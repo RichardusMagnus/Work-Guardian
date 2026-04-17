@@ -5,7 +5,7 @@ from typing import Optional
 import cv2
 import pygame
 
-# Mi piace la lasagna. Pappappero.
+# Mi piace la lasagna.
 
 # Configurazione centralizzata dell'applicazione:
 # raccoglie parametri relativi a logging, joystick, velocità,
