@@ -1,0 +1,17 @@
+# Istruzioni per il Laboratorio - Integrazione CPS
+
+Questo file contiene i passaggi necessari per collegare il Drone Tello al Server centrale durante il test in laboratorio.
+
+## 1. Configurazione della Rete
+- Il PC deve attivare l'**Hotspot Wi-Fi**.
+- Il PC del Drone e l'eventuale Smartwatch devono connettersi a questa rete.
+- Identificare l'indirizzo IP del PC-Server (es. `192.168.137.1`).
+
+## 2. Modifica al Codice (PC Drone)
+Nel file `main.py`, andare alla riga 347 e sostituire `"localhost"` con l'IP identificato sopra:
+`mqtt_client.connect("192.168.137.1", 1883, 60)`
+
+## 3. Sequenza di Avvio
+1. **PC Server**: Avviare Mosquitto (`mosquitto -v`).
+2. **PC Server**: Avviare il server Python (`python brain/server_cps.py`).
+3. **PC Drone**: Avviare lo script principale (`python main.py`).
