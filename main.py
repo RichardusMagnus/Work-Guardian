@@ -1,6 +1,10 @@
 import logging
 import time
 from typing import Optional
+# --- AGGIUNTA PER MQTT ---
+import json
+import paho.mqtt.client as mqtt
+# -------------------------
 
 # OpenCV è utilizzato per la gestione del flusso video, la visualizzazione
 # dei frame e l'interazione con la finestra video principale.
@@ -212,6 +216,11 @@ class VisionLoop:
             "flying": False,
             "battery": None,
         }
+        
+        # --- AGGIUNTA PER MQTT (Salvataggio dati per invio) ---
+        self.last_detections = []
+        self.last_poses = []
+        # -----------------------------------------------------
 
     def _normalize_frame_for_opencv(self, frame):
         # Normalizza il frame nel formato colore atteso da OpenCV.
@@ -324,21 +333,27 @@ class VisionLoop:
         detection_is_active = run_detection and self.detector is not None
 
         # Esecuzione opzionale della object detection.
+        # --- MODIFICA PER MQTT (Cattura detection) ---
+        self.last_detections = []
         if detection_is_active:
             try:
-                yolo_frame, _ = self.detector.detect(analysis_frame)
+                yolo_frame, detections = self.detector.detect(analysis_frame)
                 if yolo_frame is not None:
                     display_frame = yolo_frame
+                    self.last_detections = detections
             except Exception:
                 print("\n[ERRORE] Object detection fallita sul frame corrente.")
 
         # Esecuzione opzionale della stima di posa e del relativo disegno.
+        # --- MODIFICA PER MQTT (Cattura pose) ---
+        self.last_poses = []
         if self.pose_estimator is not None and self.pose_estimator.enabled:
             try:
-                display_frame, _ = self.pose_estimator.process_frame(
+                display_frame, pose_results = self.pose_estimator.process_frame(
                     analysis_frame,
                     drawing_frame=display_frame,
                 )
+                self.last_poses = pose_results
             except Exception:
                 print("\n[ERRORE] Stima posa AprilTag fallita sul frame corrente.")
 
@@ -472,6 +487,18 @@ def main():
             frame_from_controller_is_rgb=APP_CONFIG.frame_from_controller_is_rgb,
         )
 
+        # --- SETUP MQTT PER COMUNICAZIONE CPS ---
+        print_phase("5. Connessione al Broker MQTT")
+        mqtt_client = mqtt.Client()
+        try:
+            # NOTA: Per i test locali usa "localhost". Domani metti l'IP dell'Hotspot.
+            mqtt_client.connect("localhost", 1883, 60)
+            mqtt_client.loop_start()
+            print("✅ Connessione al Broker MQTT stabilita.")
+        except Exception as e:
+            print(f"⚠️ Errore connessione MQTT: {e}")
+        # ------------------------------------------
+
         # Stampa dello stato iniziale del drone.
         print_drone_status(controller, yolo_enabled=control_loop.is_detection_enabled())
 
@@ -499,6 +526,38 @@ def main():
             )
             if not running:
                 continue
+
+            # --- TRASMISSIONE DATI MQTT (Aggiunta CPS) ---
+            # Recuperiamo i dati che il codice dei colleghi ha appena generato
+            status = controller.get_status()
+            
+            # Estrazione posa (se disponibile)
+            pos_x, pos_y, pos_z, yaw = 0.0, 0.0, 0.0, 0.0
+            for p in vision_loop.last_poses:
+                if p.get("type") == "fused_camera_pose_world":
+                    pos_x = p["position_world"]["x"]
+                    pos_y = p["position_world"]["y"]
+                    pos_z = p["position_world"]["z"]
+                    yaw = p["yaw_world_deg"]
+                    break
+
+            # Costruzione del pacchetto JSON secondo il nostro contratto
+            payload = {
+                "device_id": "tello_01",
+                "telemetry": {
+                    "battery": status.get("battery", 0) if status.get("battery") is not None else 0,
+                    "is_flying": status.get("flying", False)
+                },
+                "position": {"x": pos_x, "y": pos_y, "z": pos_z, "yaw": yaw},
+                "detections": [{"label": d["label"], "conf": d["confidence"]} for d in vision_loop.last_detections]
+            }
+            
+            # Pubblicazione sul broker
+            try:
+                mqtt_client.publish("cantiere/sensori/drone", json.dumps(payload))
+            except Exception:
+                pass
+            # ---------------------------------------------
 
             # La finestra video OpenCV prevede anch'essa una scorciatoia per uscire.
             if cv2.waitKey(1) & 0xFF == ord("q"):
