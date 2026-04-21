@@ -1,6 +1,11 @@
 import time
 
+# OpenCV viene impiegato per l'acquisizione, l'elaborazione delle immagini
+# e la procedura di calibrazione basata su marker ArUco/ChArUco.
 import cv2
+
+# NumPy è utilizzato per la gestione dei vettori e delle matrici numeriche,
+# in particolare nella fase di preparazione dei punti per la calibrazione.
 import numpy as np
 
 
@@ -40,6 +45,10 @@ MARKER_LENGTH_M = 0.0235
 # Numero minimo consigliato di immagini valide da acquisire prima di eseguire la calibrazione.
 # Una quantità insufficiente di viste può compromettere la qualità dei parametri stimati.
 MIN_VALID_IMAGES = 15
+
+# Timeout massimo ammesso per l'attesa del primo frame proveniente dal drone.
+# Serve a evitare che il programma resti indefinitamente in attesa in caso di problemi nello stream.
+FRAME_TIMEOUT_SEC = 5.0
 
 
 def _create_charuco_board(dictionary):
@@ -125,6 +134,96 @@ def _detect_board(detector, board, dictionary, gray):
     return charuco_corners, charuco_ids, marker_corners, marker_ids
 
 
+def _is_valid_charuco_sample(board, charuco_ids):
+    """Verifica che la vista ChArUco sia sufficiente per la calibrazione."""
+    # Per essere utile, una vista deve contenere almeno quattro corner identificati.
+    # Un numero inferiore non consente una stima affidabile dei parametri geometrici.
+    if charuco_ids is None or len(charuco_ids) < 4:
+        return False
+
+    # Se i corner risultano collineari, la configurazione geometrica osservata
+    # è degenerata e non fornisce informazione sufficiente per la calibrazione.
+    if hasattr(board, "checkCharucoCornersCollinear") and board.checkCharucoCornersCollinear(charuco_ids):
+        return False
+
+    return True
+
+
+def _calibrate_charuco(all_charuco_corners, all_charuco_ids, board, image_size):
+    """
+    Esegue la calibrazione ChArUco con compatibilità verso versioni diverse di OpenCV.
+
+    - Se disponibile, usa cv2.aruco.calibrateCameraCharuco.
+    - In caso contrario costruisce object/image points tramite board.matchImagePoints
+      e usa cv2.calibrateCamera come fallback.
+    """
+    # Caso preferenziale: OpenCV mette a disposizione la funzione specializzata
+    # per la calibrazione diretta a partire da osservazioni ChArUco.
+    if hasattr(cv2.aruco, "calibrateCameraCharuco"):
+        return cv2.aruco.calibrateCameraCharuco(
+            charucoCorners=all_charuco_corners,
+            charucoIds=all_charuco_ids,
+            board=board,
+            imageSize=image_size,
+            cameraMatrix=None,
+            distCoeffs=None,
+        )
+
+    # In assenza della funzione dedicata, si tenta un approccio alternativo
+    # basato sulla costruzione esplicita di object points e image points.
+    if not hasattr(board, "matchImagePoints"):
+        raise RuntimeError(
+            "OpenCV non espone calibrateCameraCharuco e la board non supporta matchImagePoints: "
+            "fallback di calibrazione non disponibile in questa installazione."
+        )
+
+    # Liste che conterranno, per ogni immagine valida, la corrispondenza tra:
+    # - punti 3D noti sulla board;
+    # - punti 2D osservati nell'immagine.
+    all_object_points = []
+    all_image_points = []
+
+    # Si elaborano tutte le viste raccolte durante la fase di acquisizione.
+    for corners, ids in zip(all_charuco_corners, all_charuco_ids):
+        # Anche in fase di fallback si filtrano le osservazioni non idonee.
+        if not _is_valid_charuco_sample(board, ids):
+            continue
+
+        obj_points, img_points = board.matchImagePoints(corners, ids)
+        if obj_points is None or img_points is None:
+            continue
+
+        # Conversione esplicita in array NumPy con forma e tipo numerico compatibili
+        # con le aspettative della funzione cv2.calibrateCamera.
+        obj_points = np.asarray(obj_points, dtype=np.float32).reshape(-1, 1, 3)
+        img_points = np.asarray(img_points, dtype=np.float32).reshape(-1, 1, 2)
+
+        # Anche in questo caso si richiede un numero minimo di corrispondenze
+        # per evitare osservazioni scarsamente informative.
+        if len(obj_points) < 4 or len(img_points) < 4:
+            continue
+
+        all_object_points.append(obj_points)
+        all_image_points.append(img_points)
+
+    # Se dopo il filtraggio non rimane alcuna osservazione valida,
+    # la calibrazione non può essere eseguita.
+    if not all_object_points:
+        raise RuntimeError(
+            "OpenCV non espone calibrateCameraCharuco e non sono stati ottenuti abbastanza punti "
+            "validi per usare il fallback con calibrateCamera."
+        )
+
+    # Calibrazione standard della camera a partire dalle corrispondenze 3D-2D.
+    return cv2.calibrateCamera(
+        objectPoints=all_object_points,
+        imagePoints=all_image_points,
+        imageSize=image_size,
+        cameraMatrix=None,
+        distCoeffs=None,
+    )
+
+
 def main():
     # L'import della libreria per il drone viene effettuato all'interno della funzione
     # principale per isolare la dipendenza al solo caso d'uso effettivo del programma.
@@ -134,13 +233,6 @@ def main():
         raise ImportError(
             "Per usare il Tello devi installare djitellopy: pip install djitellopy"
         ) from exc
-
-    # Verifica della disponibilità della funzione di calibrazione ChArUco.
-    # Senza tale funzione, la fase finale di stima dei parametri intrinseci non è eseguibile.
-    if not hasattr(cv2.aruco, "calibrateCameraCharuco"):
-        raise RuntimeError(
-            "OpenCV non supporta calibrateCameraCharuco in questa installazione."
-        )
 
     # =========================
     # CREAZIONE BOARD E DETECTOR
@@ -184,6 +276,10 @@ def main():
         tello.streamon()
         frame_reader = tello.get_frame_read()
 
+        # Istante di riferimento utilizzato per misurare il tempo trascorso
+        # dall'ultima disponibilità di un frame.
+        frame_wait_started_at = time.monotonic()
+
         # Messaggi informativi per l'interazione manuale con l'utente.
         print("\nPremi:")
         print("  c -> salva una vista valida della ChArUco board")
@@ -198,8 +294,15 @@ def main():
             # Se il frame non è ancora disponibile, si attende brevemente
             # per evitare un ciclo di polling troppo aggressivo.
             if frame is None:
+                if (time.monotonic() - frame_wait_started_at) >= FRAME_TIMEOUT_SEC:
+                    raise TimeoutError(
+                        "Nessun frame ricevuto dal Tello entro il timeout iniziale di acquisizione."
+                    )
                 time.sleep(0.01)
                 continue
+
+            # Non appena un frame valido è disponibile, il timer di timeout viene azzerato.
+            frame_wait_started_at = time.monotonic()
 
             # Viene creata una copia del frame per evitare effetti collaterali
             # su eventuali buffer interni gestiti dalla libreria del drone.
@@ -273,9 +376,9 @@ def main():
 
             if key == ord("c"):
                 # Una vista viene considerata utile per la calibrazione solo
-                # se sono stati rilevati almeno 4 corner ChArUco.
+                # se sono stati rilevati almeno 4 corner ChArUco non collineari.
                 # Questa soglia minima evita di memorizzare osservazioni troppo povere.
-                if charuco_ids is not None and len(charuco_ids) >= 4:
+                if _is_valid_charuco_sample(board, charuco_ids):
                     all_charuco_corners.append(charuco_corners)
                     all_charuco_ids.append(charuco_ids)
                     print(
@@ -305,13 +408,11 @@ def main():
         # =========================
         # Stima dei parametri intrinseci della camera e dei coefficienti di distorsione
         # utilizzando l'insieme delle osservazioni ChArUco raccolte.
-        ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
-            charucoCorners=all_charuco_corners,
-            charucoIds=all_charuco_ids,
-            board=board,
-            imageSize=image_size,
-            cameraMatrix=None,
-            distCoeffs=None,
+        ret, camera_matrix, dist_coeffs, rvecs, tvecs = _calibrate_charuco(
+            all_charuco_corners,
+            all_charuco_ids,
+            board,
+            image_size,
         )
 
         # Stampa dei risultati principali della calibrazione.
@@ -360,6 +461,12 @@ def main():
     finally:
         # Blocco di rilascio risorse eseguito in ogni caso, sia in caso di successo
         # sia in presenza di errori o interruzioni anticipate.
+        if frame_reader is not None and hasattr(frame_reader, "stop"):
+            try:
+                frame_reader.stop()
+            except Exception:
+                pass
+
         if tello is not None:
             # Tentativo di arresto dello stream video.
             try:

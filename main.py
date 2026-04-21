@@ -2,157 +2,166 @@ import logging
 import time
 from typing import Optional
 
+# OpenCV è utilizzato per la gestione del flusso video, la visualizzazione
+# dei frame e l'interazione con la finestra video principale.
 import cv2
+
+# pygame viene impiegato per la gestione del controller, degli eventi utente
+# e del timing del ciclo principale dell'applicazione.
 import pygame
 
-# Mi piace la lasagna. Pappappero.
-
-# Configurazione centralizzata dell'applicazione:
-# raccoglie parametri relativi a logging, joystick, velocità,
-# detector, gestione video e stima della posa.
+# Configurazione centralizzata dell'applicazione: parametri video, logging,
+# velocità di comando, configurazioni della detection e della stima di posa.
 from app_config import APP_CONFIG
 
-# Modulo dedicato alla gestione del joystick:
-# - init_joystick(): inizializza pygame e il dispositivo di input;
-# - read_events(): legge gli eventi generati dall'utente;
-# - get_command(): traduce lo stato del joystick in comandi RC.
-from joystick_tello import get_command, init_joystick, read_events
+# Modulo dedicato alla gestione del joystick e alla traduzione degli input
+# del controller in comandi elementari per il drone.
+from joystick_tello import (
+    close_joystick,
+    get_command,
+    init_joystick,
+    print_joystick_help,
+    read_events,
+)
 
-# Interfaccia di controllo del drone reale DJI Tello.
+# Controller ad alto livello per l'interazione con il drone reale Tello.
 from real_tello_controller import RealTelloController
 
-# Modulo per la stima della posa della camera tramite AprilTag
-# e per l'eventuale correzione della distorsione ottica.
+# Stimatore della posa della camera basato su marker/tag visivi.
 from tello_pose_detection import CameraPoseEstimator
 
-# Modulo di object detection, tipicamente basato su YOLO.
+# Rilevatore di oggetti, verosimilmente basato su YOLO.
 from vision_detector import ObjectDetector
 
-
-# Logger di modulo: consente di tracciare messaggi diagnostici
-# riferiti specificamente a questo file.
+# Logger di modulo usato per eventuali messaggi diagnostici e di debug.
 LOGGER = logging.getLogger(__name__)
 
 
-def configure_logging(level: str):
-    """Configura il logging applicativo."""
-    # Converte il livello di logging espresso come stringa
-    # (ad esempio "INFO", "DEBUG", "WARNING") nel corrispondente
+def _resolve_log_level(default=logging.WARNING):
+    # Converte il livello di log configurato in APP_CONFIG nel corrispondente
     # valore numerico previsto dal modulo logging.
-    # Se il livello non è riconosciuto, viene usato INFO come default.
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    # Se il nome specificato non corrisponde a un attributo valido di logging,
+    # viene usato il valore di default.
+    level_name = str(APP_CONFIG.log_level).upper()
+    return getattr(logging, level_name, default)
 
-    # basicConfig inizializza la configurazione globale del logging.
-    # force=True assicura che eventuali configurazioni precedenti
-    # vengano sovrascritte.
+
+def configure_logging():
+    """
+    Riduce i log rumorosi nel terminale.
+    L'output utente principale viene gestito con print strutturati.
+    """
+    # Determina il livello di logging desiderato a partire dalla configurazione.
+    log_level = _resolve_log_level()
+
+    # Configurazione globale del sistema di logging:
+    # - livello minimo dei messaggi da mostrare;
+    # - formato uniforme per tutti i logger;
+    # - force=True per sovrascrivere eventuali configurazioni precedenti.
     logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        level=log_level,
+        format="[%(levelname)s] %(name)s | %(message)s",
         force=True,
     )
 
+    # Alcune librerie esterne possono produrre messaggi molto verbosi;
+    # per questo motivo si impone almeno WARNING per tali logger.
+    logging.getLogger("djitellopy").setLevel(max(logging.WARNING, log_level))
+    logging.getLogger("ultralytics").setLevel(max(logging.WARNING, log_level))
 
-def print_joystick_help():
-    """Stampa a terminale i comandi del joystick."""
-    # Recupera dalla configurazione la mappatura semantica
-    # dei pulsanti e degli assi del joystick.
-    mapping = APP_CONFIG.joystick
+    # Si allinea il livello dei principali moduli del progetto alla configurazione scelta.
+    logging.getLogger(__name__).setLevel(log_level)
+    logging.getLogger("real_tello_controller").setLevel(log_level)
+    logging.getLogger("vision_detector").setLevel(log_level)
+    logging.getLogger("tello_pose_detection").setLevel(log_level)
+    logging.getLogger("joystick_tello").setLevel(log_level)
 
-    # Stampa una guida sintetica per l'utente.
-    # L'uso di specificatori di formato (<25) allinea i testi
-    # e rende la visualizzazione più leggibile a terminale.
-    print("\n============================================================")
-    print("COMANDI JOYSTICK")
-    print("============================================================")
-    print(f"{mapping.label_takeoff:<25} -> Decollo")
-    print(f"{mapping.label_land:<25} -> Atterraggio")
-    print(f"{mapping.label_quit:<25} -> Uscita dal programma")
-    print(f"{mapping.label_axis_lr:<25} -> Sinistra / Destra")
-    print(f"{mapping.label_axis_fb:<25} -> Avanti / Indietro")
-    print(f"{mapping.label_axis_ud:<25} -> Su / Giù")
-    print(f"{mapping.label_axis_yaw:<25} -> Rotazione (Yaw)")
-    print("ESC da tastiera          -> Uscita dal programma")
-    print("q nella finestra video   -> Uscita dal programma")
-    print("============================================================\n")
+
+def print_phase(title: str):
+    # Stampa una intestazione testuale che segmenta l'esecuzione del programma
+    # in fasi logiche, rendendo più leggibile l'output su terminale.
+    print(f"\n--- {title} ---")
+
+
+def _format_battery_value(status: dict) -> str:
+    # Estrae il valore di batteria dal dizionario di stato del drone.
+    # Se il valore non è disponibile, restituisce un segnaposto testuale.
+    battery = status.get("battery")
+    return "--" if battery is None else f"{battery}%"
+
+
+def print_drone_status(controller: RealTelloController, yolo_enabled: bool):
+    # Recupera lo stato corrente del drone tramite il controller
+    # e lo presenta in forma leggibile all'utente.
+    status = controller.get_status()
+
+    print("\n[STATO DRONE]")
+    print(f"  Connesso      : {status.get('connected')}")
+    print(f"  In volo       : {status.get('flying')}")
+    print(f"  Batteria      : {_format_battery_value(status)}")
+    print(f"  YOLO attiva   : {yolo_enabled}")
+    print("----------------------------------------")
 
 
 class DroneControlLoop:
-    """
-    Gestisce il controllo del drone tramite joystick:
-    decollo, atterraggio, quit e comandi RC continui.
-    """
-
-    def __init__(self, controller: RealTelloController, speed: int, require_focus: bool = False):
-        # Riferimento all'oggetto incaricato di inviare i comandi
-        # al drone reale.
+    # Questa classe incapsula il ciclo logico di controllo del drone
+    # basato sugli eventi generati dal joystick e sui comandi analogici continui.
+    # Il suo compito principale è interpretare l'input utente e tradurlo
+    # in richieste di decollo, atterraggio, attivazione detection e comandi RC.
+    def __init__(self, controller: RealTelloController, speed: int, detection_available: bool = True):
+        # controller: interfaccia verso il drone reale.
+        # speed: valore massimo di velocità da applicare ai comandi analogici.
+        # detection_available: indica se il modulo di object detection è stato
+        # inizializzato correttamente ed è quindi utilizzabile.
         self.controller = controller
-
-        # Velocità scalare usata per convertire gli input del joystick
-        # in valori RC compatibili con il drone.
         self.speed = speed
+        self.detection_available = detection_available
 
-        # Se True, i comandi vengono accettati solo quando la finestra
-        # pygame associata al joystick è attiva/in focus.
-        self.require_focus = require_focus
+        # Stato interno che memorizza se la detection YOLO è attiva o meno.
+        self._detection_enabled = False
 
-    def _focus_allows_control(self, actions: dict) -> bool:
-        """
-        Restituisce True se i comandi joystick devono essere accettati.
-
-        Quando require_focus è attivo, blocchiamo sia i pulsanti
-        sia i comandi continui se la finestra pygame non è attiva.
-        """
-        # Se require_focus è False, il controllo è sempre consentito.
-        # In caso contrario, si controlla il flag "focused" restituito
-        # dal sistema di lettura eventi.
-        return (not self.require_focus) or actions.get("focused", True)
+    def is_detection_enabled(self) -> bool:
+        # Restituisce lo stato corrente della detection, utile per sincronizzare
+        # il comportamento del ciclo di visione con quello del controllo.
+        return self._detection_enabled
 
     def step(self) -> bool:
-        # Legge gli eventi correnti generati da joystick/tastiera.
-        # Il dizionario risultante contiene tipicamente flag booleani
-        # per azioni discrete (takeoff, land, quit) e informazioni
-        # contestuali, come il focus della finestra.
+        # Esegue un singolo passo del ciclo di controllo.
+        # Restituisce:
+        # - True se il programma può continuare;
+        # - False se è stata richiesta l'uscita.
         actions = read_events()
 
-        # Determina se, in questo istante, il sistema deve accettare
-        # o ignorare i comandi dell'utente.
-        focus_allows_control = self._focus_allows_control(actions)
+        # Gestione degli eventi discreti provenienti dal controller.
+        if actions["takeoff"]:
+            self.controller.takeoff()
+            print("\n[EVENTO] Decollo richiesto.")
 
-        # Le azioni discrete di decollo e atterraggio vengono accettate
-        # solo se il controllo è abilitato dal focus.
-        if focus_allows_control:
-            if actions["takeoff"]:
-                self.controller.takeoff()
+        if actions["land"]:
+            self.controller.land()
+            print("\n[EVENTO] Atterraggio richiesto.")
 
-            if actions["land"]:
-                self.controller.land()
+        # Gestione del comando di attivazione/disattivazione della detection.
+        if actions.get("detect", False):
+            if not self.detection_available:
+                print("\n[AVVISO] Detection YOLO non disponibile: comando ignorato.")
+            else:
+                self._detection_enabled = not self._detection_enabled
+                stato = "attivata" if self._detection_enabled else "disattivata"
+                print(f"\n[EVENTO] Detection YOLO {stato}.")
 
-        # Il comando di uscita è sempre considerato prioritario.
+        # Gestione della richiesta di uscita.
         if actions["quit"]:
-            # Prima di uscire, azzeriamo i comandi RC per evitare che
-            # il drone continui a ricevere un ultimo comando non nullo.
+            # Prima di terminare si invia un comando nullo per arrestare eventuali
+            # movimenti residui del drone.
             self.controller.send_rc_control(0, 0, 0, 0)
+            print("\n[EVENTO] Uscita richiesta.")
             return False
 
-        # Se il controllo è consentito, il comando continuo viene ricavato
-        # leggendo lo stato corrente del joystick; altrimenti si impone
-        # un vettore nullo, così da congelare il moto.
-        if focus_allows_control:
-            command = get_command(self.speed, require_focus=self.require_focus)
-        else:
-            command = {
-                "lr": 0,
-                "fb": 0,
-                "ud": 0,
-                "yaw": 0,
-            }
+        # Lettura del comando continuo dagli assi del joystick.
+        command = get_command(self.speed)
 
         # Invio del comando RC al drone.
-        # Le quattro componenti rappresentano:
-        # - lr: left/right
-        # - fb: forward/backward
-        # - ud: up/down
-        # - yaw: rotazione attorno all'asse verticale
         self.controller.send_rc_control(
             command["lr"],
             command["fb"],
@@ -160,153 +169,198 @@ class DroneControlLoop:
             command["yaw"],
         )
 
-        # True indica che il loop principale può proseguire.
         return True
 
 
 class VisionLoop:
-    """
-    Gestisce il flusso video:
-    - acquisizione frame dal Tello
-    - normalizzazione eventuale RGB/BGR
-    - undistortion per la posa camera
-    - YOLO detection
-    - AprilTag pose estimation
-    - visualizzazione finale
-    """
-
+    # Questa classe gestisce il ciclo di elaborazione video.
+    # Essa si occupa di:
+    # - acquisire i frame dal controller del drone;
+    # - applicare, se disponibili, correzione geometrica e stima di posa;
+    # - eseguire la object detection, se richiesta;
+    # - visualizzare il frame finale con sovraimpressioni informative.
     def __init__(
         self,
-        detector: ObjectDetector,
+        detector: Optional[ObjectDetector],
         pose_estimator: Optional[CameraPoseEstimator],
         frame_timeout_sec: float,
         frame_from_controller_is_rgb: bool = False,
+        status_refresh_sec: float = 1.0,
     ):
-        # Detector usato per l'analisi semantica del frame.
+        # detector: modulo di object detection opzionale.
+        # pose_estimator: modulo di stima posa opzionale.
+        # frame_timeout_sec: timeout massimo ammesso senza ricevere frame.
+        # frame_from_controller_is_rgb: specifica il formato colore del frame
+        # restituito dal controller.
+        # status_refresh_sec: intervallo minimo tra due aggiornamenti dello stato.
         self.detector = detector
-
-        # Stimatore della posa della camera. È opzionale:
-        # se None, il programma eseguirà solo l'object detection.
         self.pose_estimator = pose_estimator
-
-        # Timeout massimo ammesso senza ricezione di frame video.
-        # Oltre tale soglia il flusso viene considerato guasto.
         self.frame_timeout_sec = frame_timeout_sec
-
-        # Flag che specifica il formato cromatico dei frame ricevuti.
-        # OpenCV utilizza convenzionalmente BGR, mentre altri sistemi
-        # possono produrre frame in RGB.
         self.frame_from_controller_is_rgb = frame_from_controller_is_rgb
+        self.status_refresh_sec = status_refresh_sec
 
-        # Timestamp dell'ultimo frame valido ricevuto.
-        # Viene inizializzato all'istante corrente per avviare il conteggio
-        # del timeout fin dalla creazione dell'oggetto.
+        # Timestamp dell'ultimo frame ricevuto, utile per rilevare timeout video.
         self.last_frame_received_at = time.monotonic()
 
+        # Timestamp dell'ultimo aggiornamento dello stato del drone.
+        self.last_status_refresh_at = 0.0
+
+        # Stato cache del drone, usato per evitare interrogazioni troppo frequenti
+        # e per disegnare informazioni a video anche in caso di errore temporaneo.
+        self.cached_status = {
+            "connected": False,
+            "flying": False,
+            "battery": None,
+        }
+
     def _normalize_frame_for_opencv(self, frame):
-        """
-        Se il controller restituisce frame RGB, li convertiamo in BGR
-        perché OpenCV lavora in BGR.
-        """
-        # Conversione necessaria per mantenere compatibilità con le
-        # funzioni OpenCV e con eventuali moduli che assumono BGR in input.
+        # Normalizza il frame nel formato colore atteso da OpenCV.
+        # Se il frame arriva in RGB, viene convertito in BGR;
+        # altrimenti viene restituito invariato.
         if self.frame_from_controller_is_rgb:
             return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         return frame
 
-    def step(self, controller: RealTelloController) -> bool:
-        # Acquisisce il frame corrente dal controller del drone.
+    def _refresh_status(self, controller: RealTelloController):
+        # Aggiorna periodicamente lo stato del drone.
+        # La frequenza di refresh è limitata per ridurre chiamate ripetute
+        # al controller durante il ciclo video.
+        now = time.monotonic()
+        if (now - self.last_status_refresh_at) < self.status_refresh_sec:
+            return
+
+        self.last_status_refresh_at = now
+        try:
+            status = controller.get_status()
+            self.cached_status = {
+                "connected": status.get("connected", False),
+                "flying": status.get("flying", False),
+                "battery": status.get("battery"),
+            }
+        except Exception:
+            # In caso di errore, si imposta uno stato conservativo di fallback.
+            self.cached_status = {
+                "connected": False,
+                "flying": False,
+                "battery": None,
+            }
+
+    def _draw_status_overlay(self, frame, detection_enabled: bool = False):
+        # Disegna sul frame un pannello testuale con le principali informazioni
+        # sullo stato del drone e della detection.
+        connected_text = str(self.cached_status.get("connected", False))
+        flying_text = str(self.cached_status.get("flying", False))
+
+        battery_value = self.cached_status.get("battery")
+        battery_text = "--" if battery_value is None else f"{battery_value}%"
+
+        detection_text = str(detection_enabled)
+
+        lines = [
+            f"Connesso      : {connected_text}",
+            f"In volo       : {flying_text}",
+            f"Batteria      : {battery_text}",
+            f"YOLO attiva   : {detection_text}",
+        ]
+
+        # Coordinate iniziali della scrittura a video.
+        x = 20
+        y = 30
+        for line in lines:
+            cv2.putText(
+                frame,
+                line,
+                (x, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 255),
+                2,
+            )
+            y += 30
+
+    def step(self, controller: RealTelloController, run_detection: bool = False) -> bool:
+        # Esegue un singolo passo del ciclo di visione.
+        # Restituisce:
+        # - True se il sistema può continuare;
+        # - False in caso di errore grave, ad esempio timeout prolungato del video stream.
         frame = controller.get_frame()
 
-        # Se non è disponibile alcun frame, non si interrompe
-        # immediatamente il programma: si verifica prima da quanto tempo
-        # manca il segnale video.
+        # Se il frame non è disponibile, si controlla da quanto tempo
+        # il flusso video è assente.
         if frame is None:
             elapsed = time.monotonic() - self.last_frame_received_at
             if elapsed >= self.frame_timeout_sec:
-                LOGGER.error(
-                    "Timeout del video stream: nessun frame ricevuto da %.2f secondi.",
-                    elapsed,
-                )
+                print(f"\n[ERRORE] Timeout del video stream: nessun frame ricevuto da {elapsed:.2f} secondi.")
                 return False
             return True
 
-        # Aggiorna il timestamp dell'ultimo frame ricevuto correttamente.
+        # Aggiornamento del timestamp di ultimo frame ricevuto.
         self.last_frame_received_at = time.monotonic()
 
-        # 1. Normalizzazione per OpenCV
+        # Aggiornamento periodico dello stato del drone.
+        self._refresh_status(controller)
+
+        # Uniformazione del frame al formato atteso dalle successive elaborazioni.
         frame = self._normalize_frame_for_opencv(frame)
 
-        # 2. Se la posa camera è attiva, lavoriamo su frame undistorto
-        # analysis_frame rappresenta il frame effettivamente usato
-        # per le analisi di visione.
+        # analysis_frame rappresenta il frame usato per le elaborazioni numeriche.
         analysis_frame = frame
-        if self.pose_estimator is not None and self.pose_estimator.enabled:
-            undistorted_frame = self.pose_estimator.undistort_frame(frame)
 
-            # Se la correzione della distorsione riesce, il frame corretto
-            # viene usato nelle fasi successive; altrimenti si continua
-            # sul frame originale, evitando di interrompere l'elaborazione.
-            if undistorted_frame is not None:
-                analysis_frame = undistorted_frame
-            else:
-                LOGGER.warning("Undistortion non riuscita: uso il frame originale per l'analisi.")
-
-        # 3. Object detection YOLO
-        try:
-            # Il detector restituisce tipicamente:
-            # - un frame annotato, pronto per la visualizzazione;
-            # - informazioni ausiliarie sulle detection.
-            yolo_frame, _ = self.detector.detect(analysis_frame)
-        except Exception:
-            # Un errore nel detector non deve necessariamente bloccare
-            # l'intera applicazione: il frame originale di analisi viene
-            # comunque mantenuto per la visualizzazione.
-            LOGGER.exception("Object detection fallita sul frame corrente.")
-            yolo_frame = analysis_frame
-
-        # Se YOLO non restituisce frame annotato, usiamo comunque il frame di analisi
-        display_frame = yolo_frame if yolo_frame is not None else analysis_frame
-
-        # 4. Stima posa camera / AprilTag
+        # Se disponibile, si applica la correzione della distorsione ottica.
         if self.pose_estimator is not None and self.pose_estimator.enabled:
             try:
-                # La stima della posa utilizza analysis_frame come base
-                # di analisi e può annotare il risultato direttamente
-                # sul frame già elaborato da YOLO.
+                undistorted_frame = self.pose_estimator.undistort_frame(frame)
+                if undistorted_frame is not None:
+                    analysis_frame = undistorted_frame
+            except Exception:
+                print("\n[ERRORE] Correzione della distorsione fallita sul frame corrente.")
+
+        # display_frame è il frame effettivamente mostrato a schermo,
+        # su cui possono essere sovrapposti bounding box, pose o testi.
+        display_frame = analysis_frame.copy()
+
+        # La detection è considerata attiva solo se richiesta esplicitamente
+        # e se il detector è stato inizializzato correttamente.
+        detection_is_active = run_detection and self.detector is not None
+
+        # Esecuzione opzionale della object detection.
+        if detection_is_active:
+            try:
+                yolo_frame, _ = self.detector.detect(analysis_frame)
+                if yolo_frame is not None:
+                    display_frame = yolo_frame
+            except Exception:
+                print("\n[ERRORE] Object detection fallita sul frame corrente.")
+
+        # Esecuzione opzionale della stima di posa e del relativo disegno.
+        if self.pose_estimator is not None and self.pose_estimator.enabled:
+            try:
                 display_frame, _ = self.pose_estimator.process_frame(
                     analysis_frame,
                     drawing_frame=display_frame,
                 )
             except Exception:
-                # Anche in questo caso l'errore viene registrato ma non
-                # interrompe necessariamente il flusso dell'applicazione.
-                LOGGER.exception("Stima posa AprilTag fallita sul frame corrente.")
+                print("\n[ERRORE] Stima posa AprilTag fallita sul frame corrente.")
 
-        # Visualizzazione finale del frame, se disponibile.
-        if display_frame is not None:
-            cv2.imshow("Tello Detection", display_frame)
+        # Sovrapposizione delle informazioni di stato sul frame finale.
+        self._draw_status_overlay(display_frame, detection_enabled=detection_is_active)
 
+        # Visualizzazione del frame finale nella finestra OpenCV.
+        cv2.imshow("Tello Detection", display_frame)
         return True
 
 
 def create_controller():
-    """
-    Crea e restituisce il controller del drone reale.
-
-    Returns:
-        RealTelloController: controller per il drone DJI Tello reale.
-    """
-    # La funzione isola la creazione del controller in un punto dedicato,
-    # favorendo chiarezza, centralizzazione e possibile estendibilità.
+    # Factory minimale per creare il controller del drone.
+    # L'isolamento in una funzione dedicata rende più chiara la struttura
+    # del main e facilita eventuali future estensioni.
     return RealTelloController()
 
 
 def create_detector():
-    """Crea il detector YOLO usando GPU se disponibile."""
-    # L'import di torch viene eseguito localmente per intercettare
-    # in modo esplicito l'assenza della dipendenza soltanto quando
-    # il detector viene effettivamente richiesto.
+    # Crea il detector di oggetti.
+    # La funzione verifica innanzitutto la disponibilità di torch,
+    # da cui dipende l'esecuzione del modello.
     try:
         import torch
     except ImportError as exc:
@@ -314,13 +368,10 @@ def create_detector():
             "Per usare il detector devi installare torch e le dipendenze richieste da ultralytics."
         ) from exc
 
-    # Se CUDA è disponibile, si utilizza la GPU (device 0);
-    # in caso contrario, l'elaborazione viene eseguita su CPU.
+    # Se è disponibile una GPU CUDA, il detector utilizza il dispositivo 0;
+    # altrimenti ricade sull'esecuzione su CPU.
     detector_device = 0 if torch.cuda.is_available() else "cpu"
-    LOGGER.info("Dispositivo YOLO: %s", detector_device)
 
-    # I parametri del detector sono letti dalla configurazione applicativa
-    # per mantenere separati codice e impostazioni sperimentali.
     return ObjectDetector(
         model_path=str(APP_CONFIG.model_path),
         conf=APP_CONFIG.confidence_threshold,
@@ -330,19 +381,12 @@ def create_detector():
 
 
 def create_pose_estimator():
-    """Crea il modulo di stima posa camera, se abilitato."""
-    # Sezione di configurazione dedicata alla camera pose estimation.
+    # Crea lo stimatore di posa a partire dalla configurazione dell'applicazione.
+    # Se il modulo è disabilitato in configurazione, restituisce None.
     pose_cfg = APP_CONFIG.camera_pose
-
-    # Se il modulo è disabilitato da configurazione, la funzione
-    # restituisce None e il resto del programma adatterà di conseguenza
-    # il flusso operativo.
     if not pose_cfg.enabled:
-        LOGGER.info("Stima posa camera disattivata da configurazione.")
         return None
 
-    # Costruzione dell'estimatore con parametri intrinseci della camera,
-    # coefficienti di distorsione e opzioni relative al rilevamento dei tag.
     return CameraPoseEstimator(
         camera_matrix=pose_cfg.camera_matrix,
         dist_coeffs=pose_cfg.dist_coeffs,
@@ -351,52 +395,76 @@ def create_pose_estimator():
         decimate=pose_cfg.decimate,
         tag_size_m=pose_cfg.tag_size_m,
         tag_position=pose_cfg.tag_position,
+        tag_orientation_rpy_deg=pose_cfg.tag_orientation_rpy_deg,
+        world_tags=pose_cfg.world_tags,
+        fusion_mode=pose_cfg.fusion_mode,
         enabled=pose_cfg.enabled,
     )
 
 
 def main():
-    """Avvia il controllo del Tello con joystick, YOLO e stima posa camera."""
-    # Inizializzazione del sistema di logging secondo la configurazione.
-    configure_logging(APP_CONFIG.log_level)
+    # Funzione principale del programma.
+    # Coordina:
+    # 1. inizializzazione del logging;
+    # 2. inizializzazione degli input utente;
+    # 3. connessione al drone;
+    # 4. avvio del video stream;
+    # 5. inizializzazione dei moduli di visione;
+    # 6. esecuzione del ciclo principale di controllo e visualizzazione.
+    configure_logging()
 
-    # Inizializzazione preventiva delle variabili che saranno usate
-    # nel blocco finally. Questo evita errori dovuti a riferimenti
-    # a variabili non definite in caso di eccezioni precoci.
+    # Riferimenti inizializzati a None per consentire una pulizia robusta
+    # delle risorse anche in presenza di eccezioni durante l'avvio.
     screen = None
     clock = None
     controller = None
 
     try:
-        # 1. Inizializzazione input utente
-        # Viene predisposta l'interfaccia pygame per la lettura del joystick
-        # e stampata a terminale la guida ai comandi disponibili.
+        print_phase("1. Inizializzazione input utente")
         screen = init_joystick()
+        print("Joystick inizializzato correttamente.")
         print_joystick_help()
         clock = pygame.time.Clock()
 
-        # 2. Inizializzazione drone
-        # Creazione del controller, connessione al drone e attivazione
-        # dello stream video.
+        print_phase("2. Connessione al drone")
         controller = create_controller()
         controller.connect()
+        print("Connessione al drone completata.")
+
+        print_phase("3. Avvio video stream")
         controller.start_video_stream()
+        print("Video stream attivo.")
 
-        # 3. Inizializzazione moduli di visione
-        # Si costruiscono i moduli deputati all'analisi del video:
-        # detector YOLO e, opzionalmente, estimatore della posa camera.
-        detector = create_detector()
-        pose_estimator = create_pose_estimator()
+        print_phase("4. Inizializzazione moduli di visione")
+        detector = None
+        try:
+            detector = create_detector()
+            print("Detector YOLO inizializzato.")
+        except Exception as exc:
+            # La mancata inizializzazione del detector non impedisce l'esecuzione
+            # del programma: il sistema continuerà senza object detection.
+            print(f"Detector YOLO non disponibile: {exc}")
 
-        # 4. Creazione loop di controllo e visione
-        # I due loop sono separati per mantenere distinta la logica
-        # di controllo del drone dalla logica di elaborazione video.
+        pose_estimator = None
+        try:
+            pose_estimator = create_pose_estimator()
+            if pose_estimator is not None:
+                print("Stima posa AprilTag inizializzata.")
+            else:
+                print("Stima posa AprilTag disattivata.")
+        except Exception as exc:
+            # Anche la stima di posa è opzionale: in caso di errore
+            # il sistema continua senza questo modulo.
+            print(f"Stima posa AprilTag non disponibile: {exc}")
+
+        # Creazione del ciclo di controllo del drone.
         control_loop = DroneControlLoop(
             controller=controller,
             speed=APP_CONFIG.speed,
-            require_focus=APP_CONFIG.require_focus_for_control,
+            detection_available=detector is not None,
         )
 
+        # Creazione del ciclo di visione.
         vision_loop = VisionLoop(
             detector=detector,
             pose_estimator=pose_estimator,
@@ -404,84 +472,94 @@ def main():
             frame_from_controller_is_rgb=APP_CONFIG.frame_from_controller_is_rgb,
         )
 
-        # 5. Loop principale
-        # Il programma esegue ciclicamente:
-        # - lettura e invio dei comandi di controllo;
-        # - acquisizione ed elaborazione del frame video;
-        # - gestione dell'interfaccia grafica e del frame rate.
+        # Stampa dello stato iniziale del drone.
+        print_drone_status(controller, yolo_enabled=control_loop.is_detection_enabled())
+
+        print("\nSistema pronto.")
+        print("Avvia il decollo con il controller quando vuoi.")
+
+        # Variabili per la stampa periodica dello stato del drone.
+        last_status_print_at = time.monotonic()
+        status_print_interval_sec = 5.0
+
+        # Ciclo principale dell'applicazione.
         running = True
         while running:
-            # Aggiorna la parte di controllo del drone.
+            # Prima si esegue il passo di controllo, responsabile della gestione
+            # degli input utente e dell'invio dei comandi RC al drone.
             running = control_loop.step()
             if not running:
                 continue
 
-            # Aggiorna la parte di visione artificiale.
-            running = vision_loop.step(controller)
+            # Successivamente si esegue il passo di visione,
+            # che elabora e visualizza il frame corrente.
+            running = vision_loop.step(
+                controller,
+                run_detection=control_loop.is_detection_enabled(),
+            )
             if not running:
                 continue
 
-            # Uscita da finestra OpenCV
-            # Consente la chiusura del programma anche dalla finestra video.
+            # La finestra video OpenCV prevede anch'essa una scorciatoia per uscire.
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 controller.send_rc_control(0, 0, 0, 0)
+                print("\n[EVENTO] Uscita richiesta dalla finestra video.")
                 running = False
                 continue
 
-            # Aggiornamento finestra pygame
-            # La finestra viene ridisegnata a ogni iterazione per mantenere
-            # attivo il contesto grafico usato da pygame.
+            # Stampa periodica dello stato sintetico del drone.
+            now = time.monotonic()
+            if now - last_status_print_at >= status_print_interval_sec:
+                print_drone_status(controller, yolo_enabled=control_loop.is_detection_enabled())
+                last_status_print_at = now
+
+            # Aggiornamento della finestra pygame, usata principalmente
+            # per mantenere attivo il contesto degli eventi del joystick.
             if screen is not None:
                 screen.fill((30, 30, 30))
                 pygame.display.flip()
 
-            # Limitazione FPS
-            # Regola la frequenza del ciclo principale per evitare
-            # uso eccessivo della CPU e mantenere un comportamento stabile.
+            # Regolazione della frequenza del ciclo principale.
             if clock is not None:
                 clock.tick(APP_CONFIG.fps)
 
     except KeyboardInterrupt:
-        # Gestione esplicita dell'interruzione da tastiera (Ctrl+C).
-        LOGGER.info("Interruzione richiesta dall'utente.")
-    except Exception:
-        # Qualsiasi altra eccezione viene registrata come errore fatale
-        # e poi rilanciata per non nascondere il problema.
-        LOGGER.exception("Errore fatale durante l'esecuzione del programma.")
+        # Gestione dell'interruzione manuale da tastiera.
+        print("\n[EVENTO] Interruzione richiesta dall'utente.")
+    except Exception as exc:
+        # In caso di errore non gestito, il programma informa l'utente
+        # e rilancia l'eccezione per non mascherare la causa originaria.
+        print(f"\n[ERRORE FATALE] {exc}")
         raise
     finally:
-        # Cleanup sicuro
-        # Questa sezione viene eseguita sempre, sia in caso di terminazione
-        # normale sia in presenza di eccezioni.
+        # Blocco di pulizia finale eseguito indipendentemente dall'esito.
         if controller is not None:
             try:
-                # Azzeramento finale dei comandi RC per impedire che il drone
-                # mantenga un comando residuo dopo la chiusura del programma.
+                # Invio di un comando nullo per arrestare i motori comandati via RC.
                 controller.send_rc_control(0, 0, 0, 0)
             except Exception:
-                LOGGER.exception("Errore durante l'azzeramento dei comandi RC.")
+                pass
 
             try:
-                # Se il drone risulta ancora in volo, si tenta un atterraggio
-                # di sicurezza prima della chiusura completa del controller.
+                # Se il drone risulta ancora in volo, si tenta un atterraggio controllato.
                 if getattr(controller, "is_flying", False):
                     controller.land()
             except Exception:
-                LOGGER.exception("Errore durante l'atterraggio di sicurezza.")
+                pass
 
             try:
-                # Chiusura della connessione e rilascio delle risorse
-                # associate al controller del drone.
+                # Chiusura della sessione di comunicazione con il drone.
                 controller.end()
             except Exception:
-                LOGGER.exception("Errore durante la chiusura del controller.")
+                pass
 
-        # Chiusura delle finestre OpenCV e terminazione di pygame.
+        # Rilascio delle risorse grafiche e di input.
         cv2.destroyAllWindows()
+        close_joystick()
         pygame.quit()
 
 
+# Punto di ingresso standard dello script.
+# main() viene eseguita solo se questo file è lanciato direttamente.
 if __name__ == "__main__":
-    # Punto di ingresso del programma quando il file viene eseguito
-    # direttamente come script principale.
     main()

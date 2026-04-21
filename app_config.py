@@ -1,51 +1,48 @@
-# Importazione del decoratore @dataclass e della funzione field.
-# @dataclass consente di definire classi orientate principalmente alla memorizzazione
-# di dati in modo sintetico e leggibile; field permette di specificare modalità
-# particolari di inizializzazione degli attributi.
 from dataclasses import dataclass, field
-
-# Path fornisce un'interfaccia ad oggetti per la gestione dei percorsi di file e cartelle.
 from pathlib import Path
 
-
-# Directory base del file corrente.
-# Viene calcolata a partire dal percorso assoluto del file Python in esecuzione
-# e costituisce il riferimento per costruire percorsi relativi, ad esempio
-# verso modelli o risorse applicative.
+# BASE_DIR rappresenta la directory che contiene il file corrente.
+# Tale riferimento viene utilizzato come punto di partenza robusto per
+# costruire percorsi relativi ad altre risorse del progetto, ad esempio
+# modelli di deep learning o file di configurazione.
 BASE_DIR = Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True)
 class JoystickMapping:
-    # Classe di configurazione immutabile che raccoglie la mappatura tra
-    # i controlli fisici del joystick e i comandi logici utilizzati dall'applicazione.
-    # L'opzione frozen=True rende gli oggetti non modificabili dopo la creazione,
-    # così da preservare la coerenza della configurazione durante l'esecuzione.
+    # Configurazione immutabile della mappatura tra pulsanti/assi del joystick
+    # e comandi logici dell'applicazione.
+    #
+    # L'uso di una dataclass frozen=True consente di trattare questa struttura
+    # come un insieme di parametri di configurazione non modificabili durante
+    # l'esecuzione, riducendo il rischio di alterazioni accidentali.
 
-    # Indici reali usati da pygame per identificare i pulsanti del controller.
-    # Tali valori dipendono dalla convenzione adottata dal dispositivo e dalla libreria.
+    # Indici dei pulsanti associati alle principali azioni di controllo.
     button_takeoff: int = 0
     button_land: int = 1
+    button_detection: int = 2
     button_quit: int = 9
 
-    # Indici degli assi analogici associati ai diversi gradi di libertà del drone:
-    # left-right, forward-backward, yaw e up-down.
+    # Indici degli assi analogici impiegati per il controllo del drone
+    # lungo le diverse direzioni di movimento.
     axis_lr: int = 0
     axis_fb: int = 1
     axis_yaw: int = 2
     axis_ud: int = 3
 
-    # Soglia di deadzone degli stick analogici.
-    # Valori assoluti inferiori a questa soglia vengono normalmente ignorati
-    # per evitare movimenti indesiderati dovuti a piccole oscillazioni o rumore.
+    # Soglia minima oltre la quale il valore analogico di un asse viene
+    # considerato significativo. Serve a ignorare piccole oscillazioni
+    # indesiderate del joystick attorno alla posizione neutra.
     deadzone: float = 0.15
 
-    # Etichette descrittive da mostrare all'utente nell'interfaccia o nei messaggi.
-    # Questi campi non influiscono sulla logica di controllo, ma migliorano la leggibilità.
+    # Etichette testuali dei pulsanti, utili per mostrare all'utente una
+    # corrispondenza leggibile tra input fisici e comandi applicativi.
     label_takeoff: str = "X / Cross"
     label_land: str = "O / Circle"
+    label_detection: str = "[] / Square"
     label_quit: str = "Options"
 
+    # Etichette descrittive degli assi analogici.
     label_axis_lr: str = "Stick sinistro orizzontale"
     label_axis_fb: str = "Stick sinistro verticale"
     label_axis_ud: str = "Stick destro verticale"
@@ -53,48 +50,105 @@ class JoystickMapping:
 
 
 @dataclass(frozen=True)
-class CameraPoseConfig:
-    # Classe di configurazione immutabile dedicata alla stima della posa della camera
-    # tramite rilevazione di marker AprilTag. Essa raccoglie parametri di attivazione,
-    # calibrazione e rilevazione utilizzati dal sottosistema di visione.
+class AprilTagWorldPose:
+    # Posa nota di un AprilTag nel sistema di riferimento mondo.
+    #
+    # Convenzione scelta:
+    # - posizione_m = (x, y, z) in metri;
+    # - orientation_rpy_deg = (roll, pitch, yaw) in gradi;
+    # - il frame mondo ha asse Z verso l'alto;
+    # - yaw positivo antiorario attorno a Z.
+    position_m: tuple[float, float, float]
+    orientation_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
-    # Abilita/disabilita la stima della posa tramite AprilTag.
-    # Questo flag consente di escludere l'intero blocco di stima senza dover
-    # modificare il resto del codice applicativo.
+
+@dataclass(frozen=True)
+class CameraPoseConfig:
+    # Configurazione dei parametri utilizzati per la stima di posa della camera
+    # rispetto a un marker fiduciale, verosimilmente tramite AprilTag.
+
+    # Abilita o disabilita il sottosistema di stima della posa.
     enabled: bool = True
 
-    # Parametri del detector AprilTag.
-    # tag_family identifica la famiglia di marker cercata;
-    # threads specifica il numero di thread di elaborazione;
-    # decimate regola un eventuale ridimensionamento dell'immagine per accelerare il detector.
+    # Famiglia di tag da rilevare.
     tag_family: str = "tag25h9"
+
+    # Numero di thread utilizzati dal processo di rilevamento.
+    # Un valore maggiore può migliorare le prestazioni, se l'hardware lo consente.
     threads: int = 4
+
+    # Fattore di decimazione dell'immagine per velocizzare la detection.
+    # Valori più alti riducono il dettaglio, ma possono aumentare la rapidità.
     decimate: float = 2.0
 
-    # Dimensione reale del tag espressa in metri.
-    # Questo parametro è fondamentale per convertire la stima geometrica
-    # da grandezze puramente pixel a una posa metrica nello spazio.
-    tag_size_m: float = 0.1167
+    # Dimensione reale del tag nel mondo fisico, espressa in metri.
+    # Questo parametro è necessario per ricostruire correttamente la posa 3D.
+    tag_size_m: float = 0.2
 
-    # Posizione del tag nel mondo.
-    # Per ora viene mantenuta come riferimento configurabile;
-    # la posa mostrata a video resta quella della camera nel frame del tag.
-    # La tupla rappresenta una posizione tridimensionale (x, y, z).
+    # Posizione del tag nel sistema di riferimento scelto.
+    # La tupla contiene tipicamente coordinate (x, y, z).
+    #
+    # Campo mantenuto per retrocompatibilità con il vecchio caso a singolo tag.
     tag_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
-    # Matrice intrinseca della camera.
-    # Questa matrice 3x3 contiene i parametri di calibrazione interna:
-    # lunghezze focali e coordinate del punto principale.
-    # È necessaria per la ricostruzione geometrica e per la stima della posa.
-    camera_matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] = (
+    # Orientamento del tag singolo espresso come roll, pitch, yaw in gradi.
+    # Usato solo nel caso legacy a singolo tag.
+    tag_orientation_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    # Mappa dei tag noti nel mondo.
+    # Chiave: ID del tag AprilTag.
+    # Valore: posa assoluta nota del tag nel frame mondo.
+    #
+    # Esempio da personalizzare con i vostri 4 tag:
+    # {
+    #     0: AprilTagWorldPose(position_m=(0.0, 0.0, 0.0), orientation_rpy_deg=(0.0, 0.0, 0.0)),
+    #     1: AprilTagWorldPose(position_m=(2.0, 0.0, 0.0), orientation_rpy_deg=(0.0, 0.0, 180.0)),
+    #     2: AprilTagWorldPose(position_m=(2.0, 2.0, 0.0), orientation_rpy_deg=(0.0, 0.0, -90.0)),
+    #     3: AprilTagWorldPose(position_m=(0.0, 2.0, 0.0), orientation_rpy_deg=(0.0, 0.0, 90.0)),
+    # }
+    world_tags: dict[int, AprilTagWorldPose] = field(
+        default_factory=lambda: {
+            0: AprilTagWorldPose(
+                position_m=(0.0, 0.0, 0.0),
+                orientation_rpy_deg=(0.0, 0.0, 0.0),
+            ),
+            1: AprilTagWorldPose(
+                position_m=(2.0, 0.0, 0.0),
+                orientation_rpy_deg=(0.0, 0.0, 180.0),
+            ),
+            2: AprilTagWorldPose(
+                position_m=(2.0, 2.0, 0.0),
+                orientation_rpy_deg=(0.0, 0.0, -90.0),
+            ),
+            3: AprilTagWorldPose(
+                position_m=(0.0, 2.0, 0.0),
+                orientation_rpy_deg=(0.0, 0.0, 90.0),
+            ),
+        }
+    )
+
+    # Modalità di fusione delle ipotesi di posa assoluta quando sono visibili
+    # più tag contemporaneamente:
+    # - "weighted_average": media pesata di posizione e yaw
+    # - "best_tag": usa solo il tag con peso migliore
+    fusion_mode: str = "weighted_average"
+
+    # Matrice intrinseca della camera, necessaria per la proiezione prospettica
+    # e per la stima di posa. I parametri sono generalmente ottenuti da una
+    # procedura di calibrazione della camera.
+    camera_matrix: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ] = (
         (939.9451542597831, 0.0, 486.5451569111854),
         (0.0, 940.8447164292168, 329.0528996241572),
         (0.0, 0.0, 1.0),
     )
 
-    # Coefficienti di distorsione dell'ottica.
-    # Tali valori permettono di correggere le deformazioni introdotte dalla lente,
-    # migliorando l'accuratezza della stima visiva.
+    # Coefficienti di distorsione dell'obiettivo.
+    # Anch'essi derivano dalla calibrazione e permettono di correggere
+    # le deformazioni introdotte dalla lente.
     dist_coeffs: tuple[float, float, float, float, float] = (
         0.02411954416409598,
         -0.18722784189053135,
@@ -106,64 +160,57 @@ class CameraPoseConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
-    # Classe principale di configurazione dell'applicazione.
-    # Riunisce in un unico oggetto i parametri relativi all'interfaccia grafica,
-    # al controllo del drone, alla gestione del flusso video, al modello di detection
-    # e alle sottoconfigurazioni di joystick e stima della posa.
+    # Configurazione generale dell'applicazione.
+    # Questa classe raccoglie in un unico oggetto tutti i parametri principali
+    # necessari all'esecuzione del programma.
 
-    # Dimensione della finestra grafica espressa in pixel: (larghezza, altezza).
+    # Dimensione della finestra grafica principale.
     window_size: tuple[int, int] = (960, 720)
 
-    # Titolo della finestra applicativa.
+    # Titolo mostrato nella finestra dell'applicazione.
     window_title: str = "Tello Detection - PS4 Controller"
 
-    # Velocità base dei comandi RC inviati al drone.
-    # Il valore rappresenta il livello di intensità dei comandi di movimento.
+    # Velocità di comando da inviare al drone.
     speed: int = 30
 
-    # FPS del loop principale.
-    # Determina la frequenza di aggiornamento dell'applicazione e quindi
-    # il ritmo con cui vengono gestiti eventi, rendering e comandi.
+    # Frequenza di aggiornamento desiderata dell'applicazione.
     fps: int = 20
 
-    # Se True, il joystick controlla il drone solo quando la finestra pygame è attiva.
-    # Questa scelta riduce il rischio di inviare comandi involontari quando
-    # l'utente sta interagendo con altre applicazioni.
-    require_focus_for_control: bool = True
-
-    # Timeout massimo senza ricevere frame video.
-    # Può essere usato per rilevare eventuali interruzioni del flusso della camera.
+    # Timeout massimo per la ricezione dei frame video.
+    # Se non arrivano frame entro questo intervallo, il programma può
+    # considerare la sorgente video non aggiornata o temporaneamente assente.
     frame_timeout_sec: float = 2.0
 
-    # Parametri YOLO.
-    # confidence_threshold rappresenta la soglia minima di confidenza per considerare valida una detection;
-    # image_size definisce la dimensione dell'immagine in input al modello.
+    # Soglia minima di confidenza per accettare una detection come valida.
     confidence_threshold: float = 0.5
+
+    # Dimensione dell'immagine da fornire al modello di visione.
     image_size: int = 640
 
-    # Se il frame ottenuto dal controller fosse RGB, viene convertito in BGR per OpenCV.
-    # Questo parametro serve a gestire correttamente la convenzione dei canali colore
-    # attesa dalla libreria di elaborazione delle immagini.
-    frame_from_controller_is_rgb: bool = False
+    # I frame restituiti dal controller sono già adatti a OpenCV; un'ulteriore
+    # conversione RGB->BGR altererebbe i colori e può peggiorare la detection.
+    frame_from_controller_is_rgb: bool = True
 
     # Livello di verbosità del logging applicativo.
     log_level: str = "INFO"
 
-    # Percorso del modello YOLO.
-    # Il path viene costruito in modo robusto a partire dalla directory del file corrente,
-    # così da rendere l'applicazione meno dipendente dalla cartella di esecuzione.
-    model_path: Path = BASE_DIR / "models" / "ver2clean_n300_extra_nets_s" / "weights" / "best.pt"
+    # Percorso del file contenente i pesi del modello.
+    # Il percorso è costruito in modo relativo rispetto alla directory del file,
+    # così da rendere il progetto più portabile tra ambienti diversi.
+    model_path: Path = (
+        BASE_DIR / "models" / "ver2clean_n300_extra_nets_s" / "weights" / "best.pt"
+    )
 
-    # Sottoconfigurazione relativa al joystick.
-    # field(default_factory=...) viene usato per creare una nuova istanza
-    # per ogni oggetto AppConfig, evitando problematiche legate a valori mutabili condivisi.
+    # Configurazione della mappatura del joystick.
+    # default_factory viene usato per creare una nuova istanza di default
+    # senza condividere oggetti mutabili tra eventuali istanze della classe.
     joystick: JoystickMapping = field(default_factory=JoystickMapping)
 
-    # Sottoconfigurazione relativa alla stima della posa della camera.
+    # Configurazione dei parametri di camera e stima della posa.
     camera_pose: CameraPoseConfig = field(default_factory=CameraPoseConfig)
 
 
 # Istanza globale della configurazione applicativa.
-# In questo modo il resto del programma può accedere a un unico punto centralizzato
-# contenente tutti i parametri necessari all'esecuzione.
+# In questo modo il resto del progetto può importare APP_CONFIG e accedere
+# in maniera centralizzata ai parametri di configurazione.
 APP_CONFIG = AppConfig()

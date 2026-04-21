@@ -34,6 +34,8 @@ class ObjectDetector:
             raise FileNotFoundError(f"Modello YOLO non trovato: {model_path}")
 
         # Caricamento effettivo del modello YOLO a partire dal file specificato.
+        # A partire da questo momento, self.model incapsula sia i pesi del modello
+        # sia le funzionalità di inferenza offerte dalla libreria ultralytics.
         self.model = YOLO(str(model_path_obj))
 
         # Parametri principali dell'inferenza:
@@ -109,6 +111,8 @@ class ObjectDetector:
         try:
             # Esecuzione dell'inferenza sul frame di input.
             # I parametri sono quelli configurati in fase di inizializzazione.
+            # La chiamata restituisce una collezione di risultati, uno per ciascun
+            # elemento del batch; in questo caso il batch contiene un singolo frame.
             results = self.model(
                 frame,
                 conf=self.conf,
@@ -136,6 +140,7 @@ class ObjectDetector:
         # direttamente dal metodo di utilità fornito dalla libreria.
         annotated_frame = result.plot()
 
+        # Raccolta strutturata di tutte le detection valide estratte dal frame.
         detections = []
         if result.boxes is not None:
             # Ogni elemento di result.boxes rappresenta una detection prodotta
@@ -149,6 +154,11 @@ class ObjectDetector:
                 # Se uno dei campi fondamentali non è disponibile, la detection
                 # viene scartata per evitare risultati incompleti o incoerenti.
                 if xyxy is None or conf is None or cls is None:
+                    continue
+
+                # Validazione difensiva del formato della bbox.
+                if not isinstance(xyxy, (list, tuple)) or len(xyxy) != 4:
+                    LOGGER.warning("Bounding box YOLO in formato inatteso: %r", xyxy)
                     continue
 
                 # Le coordinate del bounding box vengono convertite in interi,
