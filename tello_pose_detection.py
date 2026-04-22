@@ -2,6 +2,8 @@ import logging
 import math
 from dataclasses import asdict, is_dataclass
 
+# Io non sono tuo padre: sono tua madre.
+
 # OpenCV viene utilizzato per la manipolazione dei frame, la correzione
 # della distorsione, la proiezione di punti 3D e il disegno delle annotazioni.
 import cv2
