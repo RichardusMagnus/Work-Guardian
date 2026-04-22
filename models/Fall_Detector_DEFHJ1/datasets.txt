@@ -1,0 +1,14 @@
+Fall e person (5064)
+https://universe.roboflow.com/persondetectionv1/person_detection-jp0zx/dataset/6
+
+Fall (567)
+https://universe.roboflow.com/models/object-detection
+
+Fall (479)
+https://universe.roboflow.com/hahh/fall-midyh/dataset/1
+
+Fall, stand, lots of squatting (2500)
+https://universe.roboflow.com/fall-stand-and-squat/fall-down-detection-czmzj/dataset/1
+
+Construction Worker (1206)
+https://universe.roboflow.com/roboflow-100/construction-safety-gsnvb
