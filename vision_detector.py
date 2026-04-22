@@ -2,8 +2,8 @@ import logging
 from pathlib import Path
 
 
-# Logger di modulo utilizzato per tracciare eventi significativi, come il
-# caricamento corretto del modello o eventuali errori durante l'inferenza.
+# Logger di modulo utilizzato per registrare informazioni operative,
+# avvisi ed eventuali errori durante il caricamento del modello e l'inferenza.
 LOGGER = logging.getLogger(__name__)
 
 
@@ -11,90 +11,77 @@ class ObjectDetector:
     """Wrapper del modello YOLO usato per l'object detection."""
 
     def __init__(self, model_path: str, conf: float = 0.5, imgsz: int = 640, device="cpu"):
-        # L'import del modello viene eseguito all'interno del costruttore
-        # per rendere il modulo più flessibile: la dipendenza da ultralytics
-        # diventa necessaria solo nel momento in cui si istanzia effettivamente
-        # il detector.
+        # L'import della libreria viene eseguito all'interno del costruttore
+        # per rendere il modulo più robusto: l'errore viene sollevato solo
+        # quando si tenta effettivamente di istanziare il detector.
         try:
             from ultralytics import YOLO
         except ImportError as exc:
-            # In assenza della libreria richiesta, viene sollevata un'eccezione
-            # esplicativa che guida l'utente all'installazione corretta.
+            # In assenza della dipendenza necessaria, viene propagato un messaggio
+            # esplicativo che indica come installare il pacchetto richiesto.
             raise ImportError(
                 "Per usare il detector devi installare ultralytics: pip install ultralytics"
             ) from exc
 
-        # Il percorso del modello viene normalizzato tramite Path, così da
-        # semplificare il controllo di esistenza del file e migliorarne
-        # la portabilità tra sistemi operativi.
+        # Il percorso del modello viene convertito in oggetto Path per gestirlo
+        # in modo più sicuro e leggibile rispetto a una semplice stringa.
         model_path_obj = Path(model_path)
         if not model_path_obj.is_file():
-            # Il costruttore interrompe l'inizializzazione se il file del modello
-            # non è disponibile, evitando errori successivi più difficili da diagnosticare.
+            # Si verifica preventivamente l'esistenza del file del modello,
+            # evitando errori meno chiari nelle fasi successive di caricamento.
             raise FileNotFoundError(f"Modello YOLO non trovato: {model_path}")
 
         # Caricamento effettivo del modello YOLO a partire dal file specificato.
-        # A partire da questo momento, self.model incapsula sia i pesi del modello
-        # sia le funzionalità di inferenza offerte dalla libreria ultralytics.
         self.model = YOLO(str(model_path_obj))
 
-        # Parametri principali dell'inferenza:
-        # - conf: soglia minima di confidenza per accettare una detection
-        # - imgsz: dimensione dell'immagine usata internamente dal modello
-        # - device: dispositivo di esecuzione, ad esempio CPU o GPU
+        # Parametri di configurazione dell'inferenza:
+        # - conf: soglia minima di confidenza per mantenere una detection;
+        # - imgsz: dimensione dell'immagine usata dal modello;
+        # - device: dispositivo di esecuzione (ad esempio CPU o GPU).
         self.conf = conf
         self.imgsz = imgsz
         self.device = device
 
-        # Messaggio informativo utile in fase di esecuzione e debugging.
+        # Registrazione informativa utile per il debugging e la tracciabilità
+        # dell'esatto modello caricato a runtime.
         LOGGER.info("YOLO caricato da: %s", model_path_obj)
 
     @staticmethod
     def _tensor_to_python(value):
-        """
-        Converte tensori/array in oggetti Python standard.
-        Utile per serializzare confidence, classi e bbox.
-        """
-        # Se il valore non è presente, la funzione restituisce direttamente None.
-        # Questo consente al chiamante di gestire in modo uniforme l'assenza di dati.
+        # Metodo di utilità che converte oggetti tensore o valori compatibili
+        # in una rappresentazione Python standard.
         if value is None:
             return None
 
-        # Se l'oggetto proviene da un framework tensoriale (ad esempio PyTorch),
-        # si scollega dal grafo computazionale per evitare dipendenze dal contesto
-        # di autograd durante la conversione.
+        # Se l'oggetto supporta detach(), viene separato dal grafo computazionale.
+        # Questo è tipico dei tensori PyTorch durante o dopo l'inferenza.
         if hasattr(value, "detach"):
             value = value.detach()
 
-        # Se necessario, si sposta il dato sulla CPU, così da renderne possibile
-        # la conversione in strutture Python standard anche quando il modello
-        # è eseguito su GPU.
+        # Se disponibile, il dato viene spostato su CPU per garantirne la
+        # conversione in un formato Python serializzabile.
         if hasattr(value, "cpu"):
             value = value.cpu()
 
-        # La conversione finale produce tipicamente liste o scalari Python
-        # serializzabili e facilmente manipolabili dal resto del programma.
+        # Restituisce il contenuto come lista Python; il chiamante deciderà poi
+        # se interpretarlo come scalare o sequenza.
         return value.tolist()
 
     def _get_label(self, cls: int) -> str:
-        """Restituisce il nome leggibile della classe YOLO."""
-        # YOLO può rappresentare i nomi delle classi sia come dizionario
-        # sia come lista; il metodo gestisce entrambi i casi.
+        # Recupera la struttura dei nomi delle classi dal modello YOLO.
         names = self.model.names
 
+        # Alcune versioni/configurazioni del modello rappresentano i nomi
+        # come dizionario indicizzato dall'identificativo numerico della classe.
         if isinstance(names, dict):
-            # Se i nomi sono memorizzati in un dizionario, si usa l'indice
-            # della classe come chiave; in mancanza della chiave, si restituisce
-            # comunque l'identificativo numerico convertito in stringa.
             return str(names.get(cls, cls))
 
+        # In altri casi i nomi sono forniti come lista o sequenza ordinata.
         if names is not None and 0 <= cls < len(names):
-            # Se i nomi sono in una sequenza indicizzabile, si verifica prima
-            # che l'indice sia valido per evitare accessi fuori limite.
             return str(names[cls])
 
-        # Fallback: se il nome leggibile non è disponibile, si restituisce
-        # l'identificativo numerico della classe.
+        # Fallback: se il nome non è disponibile, viene restituito l'identificativo
+        # numerico convertito in stringa.
         return str(cls)
 
     def detect(self, frame):
@@ -102,17 +89,19 @@ class ObjectDetector:
         Esegue object detection sul frame e restituisce:
         - frame annotato
         - lista di detection strutturate
+
+        Nota: nella versione multi-modello il frame annotato non viene usato
+        dal main loop; vengono invece usate le detection strutturate per poter
+        disegnare box di colori diversi per ciascun modello.
         """
-        # In assenza di un frame valido, la funzione restituisce un risultato
-        # neutro: nessun frame annotato e nessuna detection.
+        # Se il frame non è disponibile, il metodo restituisce immediatamente
+        # un risultato nullo e una lista vuota di detection.
         if frame is None:
             return None, []
 
         try:
-            # Esecuzione dell'inferenza sul frame di input.
-            # I parametri sono quelli configurati in fase di inizializzazione.
-            # La chiamata restituisce una collezione di risultati, uno per ciascun
-            # elemento del batch; in questo caso il batch contiene un singolo frame.
+            # Esegue l'inferenza del modello sul frame corrente utilizzando
+            # i parametri di configurazione salvati nell'istanza.
             results = self.model(
                 frame,
                 conf=self.conf,
@@ -121,65 +110,99 @@ class ObjectDetector:
                 device=self.device,
             )
         except Exception:
-            # Eventuali errori durante l'inferenza vengono registrati nel logger
-            # con stack trace completo; l'eccezione viene poi rilanciata per non
-            # nascondere il problema al chiamante.
+            # In caso di errore durante l'inferenza, l'eccezione viene registrata
+            # con stack trace completo e poi rilanciata al chiamante.
             LOGGER.exception("Errore durante l'inferenza YOLO.")
             raise
 
-        # Se il modello non restituisce risultati, il frame originale viene
-        # mantenuto invariato e la lista delle detection resta vuota.
+        # Se il modello non produce alcun risultato, viene restituito il frame
+        # originale insieme a una lista vuota di detection.
         if not results:
             return frame, []
 
-        # Nel caso più comune si considera il primo risultato, corrispondente
-        # al frame elaborato.
+        # YOLO restituisce una collezione di risultati; qui si assume di lavorare
+        # con un singolo frame, quindi si considera il primo elemento.
         result = results[0]
 
-        # Generazione del frame annotato con bounding box e label disegnate
-        # direttamente dal metodo di utilità fornito dalla libreria.
-        annotated_frame = result.plot()
+        # Inizialmente il frame annotato coincide con il frame originale.
+        # Verrà eventualmente sostituito con una versione disegnata dal modello.
+        annotated_frame = frame
 
-        # Raccolta strutturata di tutte le detection valide estratte dal frame.
+        # Lista che conterrà le detection in forma strutturata, adatta a essere
+        # utilizzata dal resto dell'applicazione.
         detections = []
+
+        # Si estraggono altezza e larghezza del frame per validare e limitare
+        # le coordinate delle bounding box entro i bordi dell'immagine.
+        frame_height, frame_width = frame.shape[:2]
+
+        # Se il risultato contiene bounding box, si procede alla loro elaborazione.
         if result.boxes is not None:
-            # Ogni elemento di result.boxes rappresenta una detection prodotta
-            # dal modello. Per ciascuna di esse si estraggono coordinate,
-            # confidenza e classe predetta.
             for box in result.boxes:
+                # Estrazione dei dati principali della detection:
+                # - xyxy: coordinate del rettangolo delimitatore;
+                # - conf: punteggio di confidenza;
+                # - cls: indice numerico della classe predetta.
                 xyxy = self._tensor_to_python(box.xyxy[0])
                 conf = self._tensor_to_python(box.conf[0])
                 cls = self._tensor_to_python(box.cls[0])
 
-                # Se uno dei campi fondamentali non è disponibile, la detection
-                # viene scartata per evitare risultati incompleti o incoerenti.
+                # Se una delle componenti fondamentali non è disponibile,
+                # la detection viene scartata.
                 if xyxy is None or conf is None or cls is None:
                     continue
 
-                # Validazione difensiva del formato della bbox.
+                # Verifica di consistenza sul formato della bounding box:
+                # si richiede una sequenza di esattamente quattro valori.
                 if not isinstance(xyxy, (list, tuple)) or len(xyxy) != 4:
                     LOGGER.warning("Bounding box YOLO in formato inatteso: %r", xyxy)
                     continue
 
-                # Le coordinate del bounding box vengono convertite in interi,
-                # in quanto rappresentano posizioni di pixel nel frame:
-                # (x1, y1) angolo superiore sinistro, (x2, y2) angolo inferiore destro.
+                # Conversione delle coordinate in interi, come richiesto
+                # dalle comuni operazioni di disegno e indicizzazione su immagini.
                 x1, y1, x2, y2 = map(int, xyxy)
 
-                # Confidenza e indice di classe vengono convertiti nei tipi Python
-                # attesi per facilitare uso, stampa e serializzazione.
+                # Operazione di clamp delle coordinate per garantire che ogni
+                # estremo della bounding box ricada all'interno del frame.
+                x1 = max(0, min(frame_width - 1, x1))
+                y1 = max(0, min(frame_height - 1, y1))
+                x2 = max(0, min(frame_width - 1, x2))
+                y2 = max(0, min(frame_height - 1, y2))
+
+                # Dopo il clamp si verifica che la bounding box mantenga
+                # area positiva; in caso contrario viene considerata non valida.
+                if x2 <= x1 or y2 <= y1:
+                    LOGGER.warning(
+                        "Bounding box YOLO non valida dopo il clamp: (%s, %s, %s, %s)",
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                    )
+                    continue
+
+                # Conversione finale dei metadati nei tipi Python desiderati.
                 conf = float(conf)
                 cls = int(cls)
 
-                # Ogni detection viene salvata in forma strutturata tramite dizionario,
-                # così da rendere l'output semplice da consumare da parte di altri moduli.
-                detections.append({
-                    "label": self._get_label(cls),
-                    "confidence": conf,
-                    "bbox": (x1, y1, x2, y2),
-                })
+                # Memorizzazione della detection in forma strutturata:
+                # - label: nome leggibile della classe;
+                # - confidence: punteggio di affidabilità;
+                # - bbox: coordinate finali della bounding box.
+                detections.append(
+                    {
+                        "label": self._get_label(cls),
+                        "confidence": conf,
+                        "bbox": (x1, y1, x2, y2),
+                    }
+                )
 
-        # Output finale della procedura:
-        # - frame con annotazioni grafiche
-        # - elenco delle detection estratte in formato strutturato
+        # Se almeno una detection è stata prodotta e validata, si genera anche
+        # il frame annotato usando la funzione di plotting fornita da YOLO.
+        if detections:
+            annotated_frame = result.plot()
+
+        # Output del metodo:
+        # - frame annotato (o originale, se non vi sono detection valide);
+        # - lista delle detection strutturate.
         return annotated_frame, detections

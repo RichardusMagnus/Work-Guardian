@@ -92,6 +92,8 @@ def _create_charuco_detector(board, dictionary):
     if hasattr(cv2.aruco, "ArucoDetector"):
         aruco_detector = cv2.aruco.ArucoDetector(dictionary)
 
+    # Il valore restituito, in questo caso, è un contenitore con le dipendenze
+    # necessarie alla rilevazione manuale nei passaggi successivi.
     return {
         "board": board,
         "dictionary": dictionary,
@@ -131,6 +133,8 @@ def _detect_board(detector, board, dictionary, gray):
             board,
         )
 
+    # La funzione restituisce sia le informazioni sui marker elementari sia
+    # i corner ChArUco interpolati, che saranno poi usati per la calibrazione.
     return charuco_corners, charuco_ids, marker_corners, marker_ids
 
 
@@ -189,6 +193,8 @@ def _calibrate_charuco(all_charuco_corners, all_charuco_ids, board, image_size):
         if not _is_valid_charuco_sample(board, ids):
             continue
 
+        # La board fornisce l'associazione tra corner osservati nell'immagine
+        # e corrispondenti punti 3D del modello geometrico noto.
         obj_points, img_points = board.matchImagePoints(corners, ids)
         if obj_points is None or img_points is None:
             continue
@@ -215,6 +221,8 @@ def _calibrate_charuco(all_charuco_corners, all_charuco_ids, board, image_size):
         )
 
     # Calibrazione standard della camera a partire dalle corrispondenze 3D-2D.
+    # Il risultato contiene l'errore RMS, la matrice intrinseca, i coefficienti
+    # di distorsione e, per ogni immagine, i vettori di posa stimati.
     return cv2.calibrateCamera(
         objectPoints=all_object_points,
         imagePoints=all_image_points,
@@ -281,6 +289,8 @@ def main():
         frame_wait_started_at = time.monotonic()
 
         # Messaggi informativi per l'interazione manuale con l'utente.
+        # L'utente può decidere quando una vista è sufficientemente diversa
+        # e ben inquadrata da essere memorizzata per la calibrazione.
         print("\nPremi:")
         print("  c -> salva una vista valida della ChArUco board")
         print("  q -> termina e calibra")
@@ -389,6 +399,8 @@ def main():
 
             elif key == ord("q"):
                 # Interruzione manuale della fase di acquisizione.
+                # I dati raccolti fino a questo momento verranno usati,
+                # se sufficienti, per la successiva calibrazione.
                 break
 
         # Prima di calibrare si verifica che il numero di viste salvate
