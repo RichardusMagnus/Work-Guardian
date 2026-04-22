@@ -1,0 +1,11 @@
+# Librerie utilizzate nel progetto:
+# - ultralytics: per il caricamento e l'esecuzione dei modelli YOLO;
+# - opencv-python (cv2): per lettura, elaborazione e visualizzazione di immagini/video;
+# - torch / torchvision: backend deep learning necessario al funzionamento dei modelli;
+# - numpy: gestione di array e dati numerici;
+# - matplotlib: eventuale visualizzazione grafica dei risultati.
+#
+# Installazione consigliata:
+#   pip install ultralytics opencv-python torch torchvision numpy matplotlib
+#
+# Le librerie standard di Python, come os, pathlib, time e sys, non richiedono installazione.
