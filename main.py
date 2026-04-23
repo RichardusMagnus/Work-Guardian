@@ -6,6 +6,7 @@ import cv2
 import pygame
 
 from app_config import APP_CONFIG
+from flight_data_logger import FlightDataLogger
 from joystick_tello import (
     close_joystick,
     get_command,
@@ -57,6 +58,7 @@ def configure_logging():
     logging.getLogger("vision_detector").setLevel(log_level)
     logging.getLogger("tello_pose_detection").setLevel(log_level)
     logging.getLogger("joystick_tello").setLevel(log_level)
+    logging.getLogger("flight_data_logger").setLevel(log_level)
 
 
 def print_phase(title: str):
@@ -180,6 +182,7 @@ class VisionLoop:
         frame_timeout_sec: float,
         frame_from_controller_is_rgb: bool = False,
         status_refresh_sec: float = 1.0,
+        flight_data_logger: Optional[FlightDataLogger] = None,
     ):
         # Lista dei detector YOLO inizializzati. Viene forzata a lista per
         # garantire una struttura uniforme anche se in ingresso è None o iterabile generico.
@@ -212,6 +215,10 @@ class VisionLoop:
             "flying": False,
             "battery": None,
         }
+
+        # Logger opzionale dei dati di volo, alimentato a partire dalla posa fusa
+        # stimata dal modulo AprilTag quando disponibile.
+        self.flight_data_logger = flight_data_logger
 
     def _normalize_frame_for_opencv(self, frame):
         # OpenCV utilizza tipicamente il formato BGR.
@@ -277,6 +284,22 @@ class VisionLoop:
                 2,
             )
             y += 30
+
+    def _log_latest_pose_estimate(self):
+        # Registra nel logger la posa assoluta più informativa disponibile.
+        # Si privilegia la posa del drone/body; in assenza di essa si usa,
+        # come fallback, la posa assoluta della camera.
+        if self.flight_data_logger is None or self.pose_estimator is None:
+            return
+
+        fused_pose = self.pose_estimator.last_fused_body_pose
+        if fused_pose is None:
+            fused_pose = self.pose_estimator.last_fused_camera_pose
+
+        if fused_pose is None:
+            return
+
+        self.flight_data_logger.log_pose_estimate(fused_pose)
 
     def _draw_multi_model_detections(self, frame, analysis_frame):
         # Esegue la detection per ciascun modello disponibile e disegna
@@ -374,6 +397,7 @@ class VisionLoop:
                     drawing_frame=display_frame,
                     frame_is_undistorted=analysis_frame_is_undistorted,
                 )
+                self._log_latest_pose_estimate()
             except Exception:
                 print("\n[ERRORE] Stima posa AprilTag fallita sul frame corrente.")
 
@@ -448,6 +472,12 @@ def create_detectors():
     return detectors
 
 
+def create_flight_data_logger():
+    # Crea il logger dei dati di volo usando il percorso centralizzato
+    # definito nella configurazione applicativa.
+    return FlightDataLogger(filename=APP_CONFIG.flight_data_log_path)
+
+
 def create_pose_estimator():
     # Crea e configura il modulo di stima posa sulla base dei parametri
     # definiti in APP_CONFIG.camera_pose.
@@ -485,6 +515,7 @@ def main():
     screen = None
     clock = None
     controller = None
+    flight_data_logger = None
 
     try:
         print_phase("1. Inizializzazione input utente")
@@ -525,6 +556,9 @@ def main():
             # Anche la stima posa è opzionale: il sistema prosegue senza tale funzionalità.
             print(f"Stima posa AprilTag non disponibile: {exc}")
 
+        flight_data_logger = create_flight_data_logger()
+        print(f"Flight data logger attivo: {APP_CONFIG.flight_data_log_path}")
+
         # Costruzione dei due cicli principali dell'applicazione:
         # uno dedicato al controllo del drone, l'altro alla visione.
         control_loop = DroneControlLoop(
@@ -538,6 +572,7 @@ def main():
             pose_estimator=pose_estimator,
             frame_timeout_sec=APP_CONFIG.frame_timeout_sec,
             frame_from_controller_is_rgb=APP_CONFIG.frame_from_controller_is_rgb,
+            flight_data_logger=flight_data_logger,
         )
 
         print_drone_status(controller, yolo_enabled=control_loop.is_detection_enabled())
@@ -616,6 +651,18 @@ def main():
                 controller.end()
             except Exception:
                 pass
+
+        if flight_data_logger is not None:
+            try:
+                if flight_data_logger.has_data():
+                    saved_path = flight_data_logger.save_to_file()
+                    if saved_path is not None:
+                        print(f"\n[LOG VOLO] Dati salvati in: {saved_path}")
+                    print(flight_data_logger.get_summary())
+                else:
+                    print("\n[LOG VOLO] Nessuna posa valida registrata: file non generato.")
+            except Exception:
+                LOGGER.exception("Errore durante il salvataggio finale dei dati di volo.")
 
         # Chiusura delle finestre e dei sottosistemi grafici/input.
         cv2.destroyAllWindows()

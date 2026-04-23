@@ -172,70 +172,22 @@ class CameraPoseConfig:
     # accidentalmente lo stesso oggetto mutabile tra istanze diverse della classe.
     world_tags: dict[int, AprilTagWorldPose] = field(
         default_factory=lambda: {
-            #0: AprilTagWorldPose(
-            #    position_m=(1.7, 0.9, 1.4),
-            #    orientation_rpy_deg=(-90.0, 0.0, 90.0),
-            #),
-            #1: AprilTagWorldPose(
-            #    position_m=(-1.7, -0.15, 1.4),
-            #    orientation_rpy_deg=(-90.0, 0.0, -90.0),
-            #),
-            #2: AprilTagWorldPose(
-            #    position_m=(0.0, 0.0, 0.0),
-            #    orientation_rpy_deg=(0.0, 0.0, 0.0),
-            #),
-            #3: AprilTagWorldPose(
-            #    position_m=(-0.60, -4.35, 1.83),
-            #    orientation_rpy_deg=(-90.0, 0.0, 0.0),
-            #),
             0: AprilTagWorldPose(
+                position_m=(1.7, 0.9, 1.4),
+                orientation_rpy_deg=(-90.0, 0.0, 90.0),
+            ),
+            1: AprilTagWorldPose(
+                position_m=(-1.7, -0.15, 1.4),
+                orientation_rpy_deg=(-90.0, 0.0, -90.0),
+            ),
+            2: AprilTagWorldPose(
                 position_m=(0.0, 0.0, 0.0),
                 orientation_rpy_deg=(0.0, 0.0, 0.0),
             ),
-            1: AprilTagWorldPose(
-                position_m=(0.0, -2.11, 0.0),
-                orientation_rpy_deg=(0.0, 0.0, 0.0),
-            ),
-            2: AprilTagWorldPose(
-                position_m=(0.0, 2.96, 1.25),
-                orientation_rpy_deg=(-90.0, 180.0, 0.0),
-            ),
             3: AprilTagWorldPose(
-                position_m=(0.0, -5.07, 1.25),
+                position_m=(-0.60, -4.35, 1.83),
                 orientation_rpy_deg=(-90.0, 0.0, 0.0),
             ),
-            4: AprilTagWorldPose(
-                position_m=(1.86, 0.0, 1.4),
-                orientation_rpy_deg=(-90.0, 0.0, 90.0),
-            ),
-            5: AprilTagWorldPose(
-                position_m=(1.86, -2.11, 1.4),
-                orientation_rpy_deg=(-90.0, 0.0, 90.0),
-            ),
-            6: AprilTagWorldPose(
-                position_m=(1.86, -3.91, 1.4),
-                orientation_rpy_deg=(-90.0, 0.0, 90.0),
-            ),
-            7: AprilTagWorldPose(
-                position_m=(1.86, 1.8, 1.4),
-                orientation_rpy_deg=(-90.0, 0.0, 90.0),
-            ),
-            8: AprilTagWorldPose(
-                position_m=(-2.04, 0.0, 1.5),
-                orientation_rpy_deg=(-90.0, 0.0, -90.0),
-            ),
-            9: AprilTagWorldPose(
-                position_m=(-2.04, -1.35, 1.5),
-                orientation_rpy_deg=(-90.0, 0.0, -90.0),
-            ),
-            10: AprilTagWorldPose(
-                position_m=(-1.18, 2.1, 1.25),
-                orientation_rpy_deg=(-90.0, 0.0, -90.0),
-            ),
-            11: AprilTagWorldPose(
-                position_m=(-1.31, -1.35, 1.25),
-                orientation_rpy_deg=(-90.0, 0.0, -90.0),
-            ),  
         }
     )
 
@@ -311,6 +263,11 @@ class AppConfig:
             color=(255, 0, 0),
         ),
     )
+
+    # Percorso del file di log dei dati di volo generato durante l'esecuzione.
+    # L'uso di BASE_DIR rende il salvataggio indipendente dalla cartella da cui
+    # viene lanciato il programma principale.
+    flight_data_log_path: Path = BASE_DIR / "flight_data.txt"
 
     # Sottoconfigurazione relativa alla mappatura del joystick.
     joystick: JoystickMapping = field(default_factory=JoystickMapping)
