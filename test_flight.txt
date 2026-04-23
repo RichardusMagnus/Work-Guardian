@@ -1,0 +1,5 @@
+# Flight Data Logger
+# Timestamp (s), X (m), Y (m), Z (m), Yaw (deg), Tag IDs
+# Generated at: 2026-04-23 09:38:25
+
+1776929905.284,1.230,4.560,0.780,90.5,0,2
