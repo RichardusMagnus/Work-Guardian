@@ -749,16 +749,26 @@ class CameraPoseEstimator:
                 )
 
                 # Se disponibile l'extrinseca camera->drone/body, ricaviamo la posa del body nel mondo.
-                p_camera_body = self.drone_extrinsics["body_position_in_camera"]
-                R_camera_from_body = self.drone_extrinsics["rotation_camera_from_body"]
+                #
+                # Caso particolare importante: se l'extrinseca è identità, per retrocompatibilità
+                # la posa del drone/body deve coincidere con quella della camera, inclusa la misura
+                # dello yaw. In caso contrario si usa la trasformazione rigida completa e si assume
+                # convenzionalmente l'asse +X come forward del body.
+                if self.drone_extrinsics["is_identity"]:
+                    p_world_body = p_world_camera.copy()
+                    R_world_from_body = R_world_from_camera.copy()
+                    body_yaw_world_deg = float(camera_yaw_world_deg)
+                else:
+                    p_camera_body = self.drone_extrinsics["body_position_in_camera"]
+                    R_camera_from_body = self.drone_extrinsics["rotation_camera_from_body"]
 
-                p_world_body = R_world_from_camera @ p_camera_body + p_world_camera
-                R_world_from_body = R_world_from_camera @ R_camera_from_body
+                    p_world_body = R_world_from_camera @ p_camera_body + p_world_camera
+                    R_world_from_body = R_world_from_camera @ R_camera_from_body
 
-                # Per il body si assume come asse forward l'asse +X, tipico dei frame robotici.
-                body_yaw_world_deg = self._wrap_angle_deg(
-                    self._extract_world_yaw_deg(R_world_from_body, local_forward_axis="x")
-                )
+                    # Per il body si assume come asse forward l'asse +X, tipico dei frame robotici.
+                    body_yaw_world_deg = self._wrap_angle_deg(
+                        self._extract_world_yaw_deg(R_world_from_body, local_forward_axis="x")
+                    )
 
                 # Memorizzazione della posa assoluta del drone/body per il singolo tag.
                 per_tag_result["drone_position_in_world_frame"] = {
