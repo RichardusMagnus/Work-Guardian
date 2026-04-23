@@ -8,8 +8,11 @@ from ultralytics import YOLO
 # lanciato da una directory differente.
 BASE_DIR = Path(__file__).resolve().parent
 
-# Path del modello
-MODEL_PATH = BASE_DIR / "models" / "Fall_Detector_DEFHJ1" / "weights" / "best.pt"
+# Path del modello.
+# Il percorso è stato allineato a quello usato nel resto del progetto
+# (app_config.py e multitest.py), evitando incoerenze tra script di test
+# e applicazione principale.
+MODEL_PATH = BASE_DIR / "YOLO" / "ModelTester" / "models" / "Fall_Detector_DEFHJ1" / "weights" / "best.pt"
 
 # Risoluzione
 IMAGE_WIDTH = 640  # 1280
