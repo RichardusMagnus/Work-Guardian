@@ -16,6 +16,9 @@ from joystick_tello import (
 from real_tello_controller import RealTelloController
 from tello_pose_detection import CameraPoseEstimator
 from vision_detector import ObjectDetector
+from flight_data_logger import FlightDataLogger
+
+logger = FlightDataLogger("flight_log.txt")  # Inizializza una volta
 
 # Logger di modulo, utile per eventuali messaggi diagnostici coerenti con il nome del file corrente.
 LOGGER = logging.getLogger(__name__)
@@ -369,11 +372,19 @@ class VisionLoop:
         # e disegna i relativi elementi sul frame da visualizzare.
         if self.pose_estimator is not None and self.pose_estimator.enabled:
             try:
-                display_frame, _ = self.pose_estimator.process_frame(
+                display_frame, pose_results = self.pose_estimator.process_frame(
                     analysis_frame,
                     drawing_frame=display_frame,
                     frame_is_undistorted=analysis_frame_is_undistorted,
                 )
+                if pose_results and any(r.get("type") == "fused_drone_pose_world" for r in pose_results):
+                    fused = next(r for r in pose_results if r["type"] == "fused_drone_pose_world")
+                    position = np.array([[fused["position_world"]["x"]], 
+                                        [fused["position_world"]["y"]], 
+                                        [fused["position_world"]["z"]]])
+                    yaw = fused["yaw_world_deg"]
+                    tag_ids = fused["source_tag_ids"]
+                    logger.log_position(position, yaw, tag_ids)
             except Exception:
                 print("\n[ERRORE] Stima posa AprilTag fallita sul frame corrente.")
 
@@ -596,6 +607,7 @@ def main():
         print(f"\n[ERRORE FATALE] {exc}")
         raise
     finally:
+
         # Blocco di cleanup eseguito sempre, indipendentemente da errori o terminazione normale.
         if controller is not None:
             try:
@@ -616,6 +628,9 @@ def main():
                 controller.end()
             except Exception:
                 pass
+
+        logger.save_to_file()
+        print(logger.get_summary())
 
         # Chiusura delle finestre e dei sottosistemi grafici/input.
         cv2.destroyAllWindows()
