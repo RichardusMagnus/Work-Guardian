@@ -29,7 +29,7 @@ class JoystickMapping:
     button_takeoff: int = 0
     button_land: int = 1
     button_detection: int = 2
-    button_quit: int = 9
+    button_quit: int = 6
 
     # Indici degli assi analogici impiegati per il controllo del drone
     # lungo le diverse direzioni di movimento.
@@ -172,23 +172,18 @@ class CameraPoseConfig:
     # accidentalmente lo stesso oggetto mutabile tra istanze diverse della classe.
     world_tags: dict[int, AprilTagWorldPose] = field(
         default_factory=lambda: {
-            # Tag 0: marker posizionato in una posa nota dell'ambiente.
             0: AprilTagWorldPose(
                 position_m=(1.7, 0.9, 1.4),
                 orientation_rpy_deg=(-90.0, 0.0, 90.0),
             ),
-            # Tag 1: secondo marker di riferimento.
             1: AprilTagWorldPose(
                 position_m=(-1.7, -0.15, 1.4),
                 orientation_rpy_deg=(-90.0, 0.0, -90.0),
             ),
-            # Tag 2: marker posto all'origine del frame mondo.
-            # Può essere utile come riferimento principale o per test.
             2: AprilTagWorldPose(
                 position_m=(0.0, 0.0, 0.0),
                 orientation_rpy_deg=(0.0, 0.0, 0.0),
             ),
-            # Tag 3: ulteriore marker collocato in una diversa area dello spazio.
             3: AprilTagWorldPose(
                 position_m=(-0.60, -4.35, 1.83),
                 orientation_rpy_deg=(-90.0, 0.0, 0.0),
@@ -197,30 +192,13 @@ class CameraPoseConfig:
     )
 
     # Extrinseca rigida camera -> drone/body.
-    # Personalizza questi parametri se vuoi che il sistema mostri la posa
-    # del drone e non semplicemente quella della camera.
-    #
-    # Anche in questo caso si usa default_factory per creare correttamente
-    # un nuovo oggetto di configurazione per ciascuna istanza.
     drone_extrinsics: DroneExtrinsicsConfig = field(default_factory=DroneExtrinsicsConfig)
 
     # Modalità di fusione delle ipotesi di posa assoluta quando sono visibili
-    # più tag contemporaneamente:
-    # - "weighted_average": media pesata di posizione e yaw
-    # - "best_tag": usa solo il tag con peso migliore
-    #
-    # Tale parametro regola il criterio con cui combinare informazioni multiple
-    # provenienti da differenti marker osservati nella stessa immagine.
+    # più tag contemporaneamente.
     fusion_mode: str = "weighted_average"
 
-    # Matrice intrinseca della camera, necessaria per la proiezione prospettica
-    # e per la stima di posa. I parametri sono generalmente ottenuti da una
-    # procedura di calibrazione della camera.
-    #
-    # La struttura 3x3 segue la forma classica della matrice intrinseca:
-    # [fx,  0, cx]
-    # [ 0, fy, cy]
-    # [ 0,  0,  1]
+    # Matrice intrinseca della camera.
     camera_matrix: tuple[
         tuple[float, float, float],
         tuple[float, float, float],
@@ -232,8 +210,6 @@ class CameraPoseConfig:
     )
 
     # Coefficienti di distorsione dell'obiettivo.
-    # Anch'essi derivano da una calibrazione e servono a compensare
-    # le deformazioni introdotte dal sistema ottico della camera.
     dist_coeffs: tuple[float, float, float, float, float] = (
         0.02411954416409598,
         -0.18722784189053135,
@@ -246,10 +222,6 @@ class CameraPoseConfig:
 @dataclass(frozen=True)
 class AppConfig:
     # Configurazione generale dell'applicazione.
-    #
-    # Questa classe aggrega in un unico punto i principali parametri globali
-    # del programma: impostazioni della finestra grafica, parametri operativi,
-    # modelli di detection e sottoconfigurazioni dei moduli di input e posa.
 
     # Dimensioni della finestra grafica di visualizzazione espresse in pixel.
     window_size: tuple[int, int] = (960, 720)
@@ -257,9 +229,8 @@ class AppConfig:
     # Titolo mostrato nella finestra dell'applicazione.
     window_title: str = "Tello Detection - PS4 Controller"
 
-    # Velocità di comando del drone. Il significato preciso dipende
-    # dall'API del controller o del drone utilizzata dal programma principale.
-    speed: int = 30
+    # Velocità di comando del drone.
+    speed: int = 40
 
     # Frequenza di aggiornamento desiderata del ciclo video/elaborativo.
     fps: int = 20
@@ -269,35 +240,26 @@ class AppConfig:
     frame_timeout_sec: float = 2.0
 
     # Soglia minima di confidenza per accettare una detection YOLO.
-    # Predizioni con confidenza inferiore vengono tipicamente scartate.
     confidence_threshold: float = 0.5
 
     # Dimensione dell'immagine di input per il modello YOLO.
-    # In molti framework questo valore influenza sia accuratezza sia costo computazionale.
     image_size: int = 640
 
-    # Indica se il frame ottenuto dal controller/canale video è già in formato RGB.
-    # Il parametro consente di gestire eventuali conversioni di spazio colore
-    # in modo coerente nel resto dell'applicazione.
     frame_from_controller_is_rgb: bool = True
 
     # Livello di verbosità del logging applicativo.
     log_level: str = "INFO"
 
     # Elenco dei modelli YOLO caricati dal programma principale.
-    # Ogni voce corrisponde a un detector distinto.
-    #
-    # L'uso di una tupla, anziché di una lista, è coerente con la natura
-    # statica e non modificabile della configurazione.
     yolo_models: tuple[YoloModelConfig, ...] = (
         YoloModelConfig(
             name="PPE_Detector",
-            path=BASE_DIR / "models" / "PPE_Detector" / "weights" / "best.pt",
+            path=BASE_DIR / "YOLO" / "ModelTester" / "models" / "ver2clean_n300_extra_nets_s" / "weights" / "best.pt",
             color=(0, 0, 255),
         ),
         YoloModelConfig(
             name="Fall_Detector",
-            path=BASE_DIR / "models" / "Fall_Detector_DEFHJ1" / "weights" / "best.pt",
+            path=BASE_DIR / "YOLO" / "ModelTester" / "models" / "Fall_Detector_DEFHJ1" / "weights" / "best.pt",
             color=(255, 0, 0),
         ),
     )
@@ -310,6 +272,4 @@ class AppConfig:
 
 
 # Istanza globale della configurazione applicativa.
-# Essa costituisce il punto di accesso principale ai parametri del sistema
-# per gli altri moduli del progetto.
 APP_CONFIG = AppConfig()

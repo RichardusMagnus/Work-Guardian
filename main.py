@@ -439,7 +439,7 @@ def create_detectors():
         except Exception as exc:
             # Gli errori vengono raccolti per consentire un report aggregato,
             # senza interrompere il caricamento degli altri modelli.
-            load_errors.append(f"{model_cfg.name}: {exc}")
+            load_errors.append(f"{model_cfg.name} ({model_cfg.path}): {exc}")
 
     # Se nessun detector è stato inizializzato e sono presenti errori,
     # si solleva un'eccezione bloccante.

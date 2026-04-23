@@ -99,17 +99,71 @@ def _get_joystick_instance_id(joystick):
         return None
 
 
-def _get_event_instance_id(event):
-    # Estrae l'identificativo del joystick associato all'evento.
-    # Alcune versioni di pygame espongono l'attributo `instance_id`,
-    # mentre altre usano `which`: la funzione uniforma quindi l'accesso
-    # a questa informazione per rendere il codice più robusto rispetto
-    # alle differenze tra versioni dell'API.
-    event_instance_id = getattr(event, "instance_id", None)
-    if event_instance_id is not None:
-        return event_instance_id
+def _get_joystick_legacy_id(joystick):
+    # Restituisce, se disponibile, il vecchio identificativo numerico del joystick.
+    # Questo valore corrisponde al "device index" storico di pygame ed è usato
+    # come fallback di compatibilità con versioni/API che non espongono ancora
+    # in modo coerente l'attributo instance_id sugli eventi.
+    if joystick is None:
+        return None
 
-    return getattr(event, "which", None)
+    try:
+        return joystick.get_id()
+    except (AttributeError, OSError, pygame.error):
+        return None
+
+
+def _get_event_controller_ids(event):
+    # Estrae tutti gli identificativi potenzialmente presenti nell'evento.
+    # A seconda della versione di pygame/SDL e del backend, un evento joystick
+    # può esporre campi diversi, ad esempio:
+    # - instance_id (API moderna, raccomandata);
+    # - joy        (API legacy documentata come deprecata);
+    # - which      (fallback ulteriore osservabile in alcuni contesti).
+    ids = []
+    for attr_name in ("instance_id", "joy", "which"):
+        attr_value = getattr(event, attr_name, None)
+        if attr_value is None:
+            continue
+        if attr_value not in ids:
+            ids.append(attr_value)
+    return tuple(ids)
+
+
+def _event_matches_active_joystick(event, active_instance_id, active_legacy_id):
+    # Determina se l'evento deve essere attribuito al joystick attualmente gestito.
+    # La logica è volutamente permissiva in presenza di un solo controller,
+    # così da evitare falsi negativi dovuti a differenze tra versioni di pygame.
+    event_ids = _get_event_controller_ids(event)
+
+    # Se l'evento non fornisce alcun identificativo, viene accettato.
+    if not event_ids:
+        return True
+
+    # Corrispondenza diretta con l'identificativo moderno dell'istanza.
+    if active_instance_id is not None and active_instance_id in event_ids:
+        return True
+
+    # Corrispondenza con l'identificativo legacy del dispositivo.
+    if active_legacy_id is not None and active_legacy_id in event_ids:
+        return True
+
+    # In presenza di un solo joystick collegato, si accetta comunque l'evento.
+    # Questo fallback risolve casi pratici in cui il tasto venga effettivamente
+    # premuto ma pygame riporti un identificativo differente tra oggetto e evento.
+    try:
+        if pygame.joystick.get_count() <= 1:
+            LOGGER.debug(
+                "Evento joystick accettato in fallback compatibilità | event_ids=%s | instance_id=%s | legacy_id=%s",
+                event_ids,
+                active_instance_id,
+                active_legacy_id,
+            )
+            return True
+    except pygame.error:
+        pass
+
+    return False
 
 
 def _connect_first_joystick(device_index=0):
@@ -142,9 +196,11 @@ def _connect_first_joystick(device_index=0):
     # Registrazione di alcune informazioni descrittive utili in fase di avvio e debug.
     LOGGER.info("Joystick collegato: %s", JOYSTICK.get_name())
     LOGGER.info(
-        "Assi: %s | Pulsanti: %s",
+        "Assi: %s | Pulsanti: %s | instance_id=%s | legacy_id=%s",
         JOYSTICK.get_numaxes(),
         JOYSTICK.get_numbuttons(),
+        _get_joystick_instance_id(JOYSTICK),
+        _get_joystick_legacy_id(JOYSTICK),
     )
 
 
@@ -211,9 +267,10 @@ def read_events():
         "detect": False,
     }
 
-    # Identificativo dell'istanza di joystick attualmente attiva.
-    # Viene usato per filtrare eventi provenienti da dispositivi differenti.
+    # Identificativi del joystick attualmente attivo.
+    # Si mantengono sia quello moderno sia quello legacy per compatibilità.
     active_instance_id = _get_joystick_instance_id(JOYSTICK)
+    active_legacy_id = _get_joystick_legacy_id(JOYSTICK)
     mapping = APP_CONFIG.joystick
 
     # Recupero di tutti gli eventi attualmente presenti nella coda di pygame.
@@ -238,9 +295,14 @@ def read_events():
         elif event.type == pygame.JOYBUTTONDOWN:
             # Per gli eventi del joystick si verifica che provengano
             # dal controller attualmente considerato attivo.
-            event_instance_id = _get_event_instance_id(event)
-            if active_instance_id is not None and event_instance_id not in (None, active_instance_id):
+            if not _event_matches_active_joystick(event, active_instance_id, active_legacy_id):
                 continue
+
+            LOGGER.debug(
+                "JOYBUTTONDOWN ricevuto | button=%s | event_ids=%s",
+                getattr(event, "button", None),
+                _get_event_controller_ids(event),
+            )
 
             # Traduzione dei pulsanti fisici in azioni logiche applicative.
             # Questa mediazione separa il livello hardware dal livello logico.
@@ -258,29 +320,37 @@ def read_events():
             # si prova a inizializzarlo automaticamente.
             if JOYSTICK is None:
                 try:
-                    _connect_first_joystick(getattr(event, "device_index", 0))
+                    device_index = getattr(event, "device_index", getattr(event, "which", 0))
+                    _connect_first_joystick(device_index)
                     active_instance_id = _get_joystick_instance_id(JOYSTICK)
+                    active_legacy_id = _get_joystick_legacy_id(JOYSTICK)
                 except RuntimeError:
                     # In caso di problemi di connessione si prosegue senza interrompere il programma.
                     pass
 
         elif event.type == pygame.JOYDEVICEREMOVED:
             # Gestione della disconnessione del joystick.
-            removed_instance_id = _get_event_instance_id(event)
+            removed_ids = _get_event_controller_ids(event)
 
             # Se il dispositivo rimosso coincide con quello attivo,
             # oppure se l'identificativo dell'attivo non è disponibile,
             # si procede al rilascio del controller corrente.
-            if active_instance_id is None or removed_instance_id == active_instance_id:
+            if (
+                active_instance_id is None
+                or active_instance_id in removed_ids
+                or active_legacy_id in removed_ids
+            ):
                 LOGGER.warning("Joystick disconnesso.")
                 _disconnect_current_joystick()
                 active_instance_id = None
+                active_legacy_id = None
 
                 # Se sono presenti altri joystick, si tenta una riconnessione automatica.
                 if pygame.joystick.get_count() > 0:
                     try:
                         _connect_first_joystick()
                         active_instance_id = _get_joystick_instance_id(JOYSTICK)
+                        active_legacy_id = _get_joystick_legacy_id(JOYSTICK)
                     except RuntimeError:
                         # Se la riconnessione fallisce, il programma viene indirizzato verso l'uscita.
                         actions["quit"] = True
