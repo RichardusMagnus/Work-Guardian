@@ -1,0 +1,30 @@
+import sys
+import asyncio
+import aiomqtt
+import json
+
+# --- FIX PER WINDOWS ---
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# -----------------------
+
+async def main():
+    # Si collega a Mosquitto
+    async with aiomqtt.Client("localhost") as client:
+        print("⌚ Smartwatch Virtuale acceso e in ascolto...")
+        
+        # Si iscrive al canale degli allarmi
+        await client.subscribe("cantiere/allarmi")
+        
+        # Rimane in attesa infinita
+        async for message in client.messages:
+            payload = json.loads(message.payload.decode())
+            
+            # Quando arriva un messaggio, simula lo schermo e la vibrazione
+            print("\n" + "🔴"*20)
+            print("📳 [BZZZ BZZZ! Motore in vibrazione]")
+            print(f"🚨 DISPLAY LCD: {payload.get('msg')}")
+            print("🔴"*20 + "\n")
+
+if __name__ == "__main__":
+    asyncio.run(main())
