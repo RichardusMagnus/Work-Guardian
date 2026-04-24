@@ -22,8 +22,9 @@ JOYSTICK = None
 
 def _zero_command():
     # Restituisce un comando nullo su tutti gli assi di controllo.
-    # Questa funzione è utile come valore di fallback quando il joystick
-    # non è disponibile oppure quando non è possibile leggere correttamente gli input.
+    # Questa funzione costituisce un valore di fallback sicuro da usare
+    # quando il joystick non è disponibile oppure quando la lettura
+    # dell'input non può essere effettuata correttamente.
     return {
         "lr": 0,
         "fb": 0,
@@ -35,19 +36,24 @@ def _zero_command():
 def _disconnect_current_joystick():
     # Disconnette in modo sicuro il joystick attualmente associato alla variabile globale.
     # La funzione tenta di chiudere il dispositivo e, indipendentemente dall'esito,
-    # azzera il riferimento globale per evitare l'uso di un oggetto non più valido.
+    # azzera il riferimento globale per evitare l'uso successivo di un oggetto
+    # non più valido o non più sincronizzato con lo stato reale dell'hardware.
     global JOYSTICK
 
+    # Se non è presente alcun joystick attivo, non è necessario eseguire alcuna operazione.
     if JOYSTICK is None:
         return
 
     try:
+        # Richiede a pygame il rilascio del dispositivo.
         JOYSTICK.quit()
     except Exception:
         # L'eccezione viene registrata nel log per consentire diagnosi successive,
         # senza però interrompere il flusso del programma.
         LOGGER.exception("Errore durante la chiusura del joystick.")
     finally:
+        # In ogni caso il riferimento globale viene invalidato,
+        # così da mantenere coerente lo stato interno del modulo.
         JOYSTICK = None
 
 
@@ -79,17 +85,31 @@ def _enable_background_joystick_events():
 
 
 def _get_joystick_instance_id(joystick):
-    # Restituisce l'identificativo univoco dell'istanza di joystick,
-    # utile per distinguere gli eventi relativi al controller attualmente attivo.
+    # Restituisce l'identificativo univoco dell'istanza di joystick.
+    # Tale identificativo è utile per distinguere gli eventi relativi
+    # al controller attualmente attivo da quelli provenienti da altri dispositivi.
     if joystick is None:
         return None
 
     try:
         return joystick.get_instance_id()
-    except (AttributeError, pygame.error):
+    except (AttributeError, OSError, pygame.error):
         # Alcune versioni/API potrebbero non supportare tale metodo,
         # oppure il dispositivo potrebbe trovarsi in uno stato non valido.
         return None
+
+
+def _get_event_instance_id(event):
+    # Estrae l'identificativo del joystick associato all'evento.
+    # Alcune versioni di pygame espongono l'attributo `instance_id`,
+    # mentre altre usano `which`: la funzione uniforma quindi l'accesso
+    # a questa informazione per rendere il codice più robusto rispetto
+    # alle differenze tra versioni dell'API.
+    event_instance_id = getattr(event, "instance_id", None)
+    if event_instance_id is not None:
+        return event_instance_id
+
+    return getattr(event, "which", None)
 
 
 def _connect_first_joystick(device_index=0):
@@ -97,13 +117,16 @@ def _connect_first_joystick(device_index=0):
     # Se l'indice fornito non è valido, viene selezionato il primo dispositivo disponibile.
     global JOYSTICK
 
+    # Numero complessivo di joystick attualmente rilevati da pygame.
     joystick_count = pygame.joystick.get_count()
     if joystick_count < 1:
+        # In assenza di dispositivi disponibili, viene sollevata un'eccezione esplicativa.
         raise RuntimeError(
             "Nessun joystick rilevato. Collega il controller PS4 prima di avviare il programma."
         )
 
     # Validazione dell'indice del dispositivo richiesto.
+    # Se l'indice non appartiene all'intervallo valido, si forza l'uso del primo joystick.
     if not 0 <= device_index < joystick_count:
         device_index = 0
 
@@ -111,6 +134,7 @@ def _connect_first_joystick(device_index=0):
     # così da mantenere un solo joystick gestito dal programma.
     _disconnect_current_joystick()
 
+    # Creazione dell'oggetto joystick e inizializzazione del dispositivo.
     joystick = pygame.joystick.Joystick(device_index)
     joystick.init()
     JOYSTICK = joystick
@@ -132,11 +156,23 @@ def init_joystick():
     pygame.joystick.init()
 
     # Creazione della finestra applicativa in accordo con la configurazione globale.
+    # La funzione restituisce il riferimento alla superficie grafica,
+    # che potrà essere usata da altri moduli dell'applicazione.
     screen = pygame.display.set_mode(APP_CONFIG.window_size)
     pygame.display.set_caption(APP_CONFIG.window_title)
 
-    # Collegamento del primo joystick disponibile.
-    _connect_first_joystick()
+    # Se un joystick è già presente all'avvio, viene collegato subito.
+    # In caso contrario l'applicazione continua comunque a funzionare,
+    # lasciando alla gestione degli eventi la possibilità di collegare
+    # automaticamente il controller quando verrà inserito.
+    if pygame.joystick.get_count() > 0:
+        _connect_first_joystick()
+    else:
+        LOGGER.warning(
+            "Nessun joystick rilevato all'avvio: l'app resta attiva in attesa di una connessione."
+        )
+
+    # Output della funzione: finestra pygame inizializzata.
     return screen
 
 
@@ -166,6 +202,8 @@ def read_events():
     global JOYSTICK
 
     # Dizionario delle azioni elementari attivabili tramite finestra o controller.
+    # Ogni chiave rappresenta un comando logico di alto livello atteso
+    # dal resto dell'applicazione.
     actions = {
         "quit": False,
         "takeoff": False,
@@ -178,10 +216,18 @@ def read_events():
     active_instance_id = _get_joystick_instance_id(JOYSTICK)
     mapping = APP_CONFIG.joystick
 
+    # Recupero di tutti gli eventi attualmente presenti nella coda di pygame.
+    # Se la lettura fallisce, per sicurezza si richiede l'uscita dal programma.
+    try:
+        events = pygame.event.get()
+    except pygame.error:
+        actions["quit"] = True
+        return actions
+
     # Analisi sequenziale di tutti gli eventi presenti nella coda di pygame.
-    for event in pygame.event.get():
+    for event in events:
         if event.type == pygame.QUIT:
-            # Chiusura della finestra grafica.
+            # Chiusura della finestra grafica tramite interfaccia del sistema operativo.
             actions["quit"] = True
 
         elif event.type == pygame.KEYDOWN:
@@ -192,11 +238,12 @@ def read_events():
         elif event.type == pygame.JOYBUTTONDOWN:
             # Per gli eventi del joystick si verifica che provengano
             # dal controller attualmente considerato attivo.
-            event_instance_id = getattr(event, "instance_id", None)
+            event_instance_id = _get_event_instance_id(event)
             if active_instance_id is not None and event_instance_id not in (None, active_instance_id):
                 continue
 
             # Traduzione dei pulsanti fisici in azioni logiche applicative.
+            # Questa mediazione separa il livello hardware dal livello logico.
             if event.button == mapping.button_takeoff:
                 actions["takeoff"] = True
             elif event.button == mapping.button_land:
@@ -219,7 +266,7 @@ def read_events():
 
         elif event.type == pygame.JOYDEVICEREMOVED:
             # Gestione della disconnessione del joystick.
-            removed_instance_id = getattr(event, "instance_id", None)
+            removed_instance_id = _get_event_instance_id(event)
 
             # Se il dispositivo rimosso coincide con quello attivo,
             # oppure se l'identificativo dell'attivo non è disponibile,
@@ -241,6 +288,7 @@ def read_events():
                     # In assenza di controller disponibili, si richiede la chiusura.
                     actions["quit"] = True
 
+    # Output della funzione: dizionario delle azioni attivate nell'iterazione corrente.
     return actions
 
 
@@ -256,6 +304,11 @@ def _apply_deadzone(value, deadzone):
 def _axis_to_speed(value, speed):
     # Converte il valore analogico di un asse, tipicamente compreso tra -1 e 1,
     # in una velocità intera proporzionale limitata dall'ampiezza massima speed.
+    # Il flusso di conversione è il seguente:
+    # 1. vincolo della velocità massima nell'intervallo [0, 100];
+    # 2. applicazione della deadzone;
+    # 3. saturazione del valore analogico nell'intervallo [-1, 1];
+    # 4. conversione finale in intero.
     speed = max(0, min(100, int(speed)))
     value = _apply_deadzone(value, APP_CONFIG.joystick.deadzone)
     value = max(-1.0, min(1.0, value))
@@ -270,10 +323,13 @@ def _get_axis_value(index):
         return 0.0
 
     try:
+        # Verifica preventiva che l'indice richiesto corrisponda
+        # a un asse effettivamente disponibile sul controller.
         if index < 0 or index >= JOYSTICK.get_numaxes():
             return 0.0
         return JOYSTICK.get_axis(index)
     except (AttributeError, OSError, pygame.error):
+        # Gestione difensiva di possibili anomalie legate al dispositivo o all'API.
         return 0.0
 
 
@@ -282,10 +338,12 @@ def get_command(speed=50):
     # del joystick e convertendolo nel formato atteso dal resto dell'applicazione.
     try:
         # Aggiorna internamente lo stato degli eventi di pygame.
+        # Questa operazione è necessaria per mantenere aggiornati i valori degli assi.
         pygame.event.pump()
     except pygame.error:
         return _zero_command()
 
+    # Se nessun joystick è attualmente disponibile, si restituisce un comando nullo.
     if JOYSTICK is None:
         return _zero_command()
 
@@ -301,6 +359,8 @@ def get_command(speed=50):
 
     # Restituzione del comando completo nelle quattro componenti principali:
     # left-right, forward-backward, up-down e rotazione yaw.
+    # Tale struttura dati costituisce l'output logico del modulo verso
+    # i componenti che si occupano del controllo del drone.
     return {
         "lr": lr,
         "fb": fb,
