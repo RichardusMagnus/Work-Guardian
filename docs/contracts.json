@@ -1,0 +1,22 @@
+{
+  "project": "Work-Guardian",
+  "version": "1.1.0",
+  "nodes": {
+    "drone": {
+      "topic": "cantiere/sensori/drone",
+      "payload": {
+        "battery": "int (0-100)",
+        "is_flying": "bool",
+        "position": {"x": "float", "y": "float", "z": "float", "yaw": "float"},
+        "detections": [{"label": "str", "conf": "float"}]
+      }
+    },
+    "watch": {
+      "topic": "cantiere/sensori/orologio/+",
+      "payload": {
+        "heart_rate": "int",
+        "fall_detected": "bool"
+      }
+    }
+  }
+}
