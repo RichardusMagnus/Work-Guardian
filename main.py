@@ -2,10 +2,25 @@ import logging
 import time
 from typing import Optional
 
+# OpenCV è utilizzato per la gestione dei frame video, il disegno degli overlay
+# grafici e la visualizzazione della finestra contenente lo stream elaborato.
 import cv2
+
+# Pygame è impiegato per l'inizializzazione e l'aggiornamento dell'interfaccia
+# associata al joystick, mantenendo reattivo il sottosistema di input.
 import pygame
 
+# Configurazione centralizzata dell'applicazione: contiene parametri globali
+# come velocità, soglie YOLO, percorsi dei modelli, opzioni video e parametri
+# per la stima della posa.
 from app_config import APP_CONFIG
+
+# Modulo dedicato alla registrazione delle pose stimate durante il volo e,
+# se previsto dalla sua implementazione, all'esportazione dei grafici di sessione.
+from flight_data_logger import FlightDataLogger
+
+# Funzioni di supporto per inizializzare il joystick, leggere gli eventi,
+# convertire gli input in comandi RC e chiudere correttamente il sottosistema.
 from joystick_tello import (
     close_joystick,
     get_command,
@@ -13,12 +28,28 @@ from joystick_tello import (
     print_joystick_help,
     read_events,
 )
+
+# Filtro di Kalman usato per stabilizzare la stima della posizione assoluta
+# ottenuta dal sottosistema di visione basato su AprilTag.
+from pose_kalman_filter import PositionKalmanFilter
+
+# Controller concreto per interagire con il drone Tello reale:
+# connessione, decollo, atterraggio, stream video e comandi RC.
 from real_tello_controller import RealTelloController
+
+# Stimatore di posa della camera/drone basato su rilevamento di AprilTag
+# e su parametri di calibrazione della camera.
 from tello_pose_detection import CameraPoseEstimator
+
+# Wrapper per i modelli YOLO utilizzati nella object detection.
 from vision_detector import ObjectDetector
 
 # Logger di modulo, utile per eventuali messaggi diagnostici coerenti con il nome del file corrente.
 LOGGER = logging.getLogger(__name__)
+
+# Titolo costante della finestra OpenCV. Viene usato sia per mostrare il frame
+# sia per verificare se l'utente ha chiuso manualmente la finestra video.
+VIDEO_WINDOW_TITLE = "Tello Detection"
 
 
 def _resolve_log_level(default=logging.WARNING):
@@ -48,15 +79,21 @@ def configure_logging():
     )
 
     # Limita la verbosità di librerie esterne frequentemente molto prolisse.
+    # max(logging.WARNING, log_level) evita di impostare tali librerie a un livello
+    # più verboso di WARNING quando il livello applicativo è molto dettagliato.
     logging.getLogger("djitellopy").setLevel(max(logging.WARNING, log_level))
     logging.getLogger("ultralytics").setLevel(max(logging.WARNING, log_level))
 
     # Imposta il livello di log per i moduli interni principali dell'applicazione.
+    # In questo modo, i componenti sviluppati nel progetto seguono una politica
+    # di logging uniforme e controllata da APP_CONFIG.
     logging.getLogger(__name__).setLevel(log_level)
     logging.getLogger("real_tello_controller").setLevel(log_level)
     logging.getLogger("vision_detector").setLevel(log_level)
     logging.getLogger("tello_pose_detection").setLevel(log_level)
     logging.getLogger("joystick_tello").setLevel(log_level)
+    logging.getLogger("flight_data_logger").setLevel(log_level)
+    logging.getLogger("pose_kalman_filter").setLevel(log_level)
 
 
 def print_phase(title: str):
@@ -75,6 +112,8 @@ def _format_battery_value(status: dict) -> str:
 def print_drone_status(controller: RealTelloController, yolo_enabled: bool):
     # Recupera e stampa in forma compatta lo stato corrente del drone,
     # includendo connettività, volo, batteria e stato della detection.
+    # Questa funzione è usata sia dopo l'inizializzazione sia periodicamente
+    # durante il ciclo principale.
     status = controller.get_status()
 
     print("\n[STATO DRONE]")
@@ -92,9 +131,14 @@ class DroneControlLoop:
     # - gestire i comandi ad alto livello (decollo, atterraggio, uscita);
     # - attivare/disattivare la detection;
     # - inviare i comandi RC continui al controller del drone.
+    #
+    # La separazione tra DroneControlLoop e VisionLoop consente di mantenere
+    # distinta la logica di pilotaggio dalla logica di elaborazione video.
 
     def __init__(self, controller: RealTelloController, speed: int, detection_available: bool = True):
         # Riferimento al controller reale del drone.
+        # Attraverso questo oggetto vengono eseguite tutte le operazioni fisiche:
+        # decollo, atterraggio e invio dei comandi di velocità.
         self.controller = controller
 
         # Velocità da utilizzare per convertire gli input del joystick
@@ -102,9 +146,11 @@ class DroneControlLoop:
         self.speed = speed
 
         # Flag che indica se i moduli di detection sono effettivamente disponibili.
+        # Il valore evita che l'utente possa attivare una funzionalità non inizializzata.
         self.detection_available = detection_available
 
         # Stato interno dell'attivazione della object detection.
+        # Il valore viene modificato tramite un comando discreto del joystick.
         self._detection_enabled = False
 
     def is_detection_enabled(self) -> bool:
@@ -121,6 +167,8 @@ class DroneControlLoop:
         actions = read_events()
 
         # Gestione del decollo.
+        # Il comando viene inoltrato solo al controller, che decide se l'operazione
+        # è coerente con lo stato attuale del drone.
         if actions["takeoff"]:
             if self.controller.takeoff():
                 print("\n[EVENTO] Decollo eseguito.")
@@ -128,6 +176,8 @@ class DroneControlLoop:
                 print("\n[AVVISO] Decollo ignorato: controlla connessione o stato del drone.")
 
         # Gestione dell'atterraggio.
+        # Anche in questo caso la verifica effettiva dello stato di volo è delegata
+        # al controller, mantenendo qui una logica applicativa di alto livello.
         if actions["land"]:
             if self.controller.land():
                 print("\n[EVENTO] Atterraggio eseguito.")
@@ -135,6 +185,7 @@ class DroneControlLoop:
                 print("\n[AVVISO] Atterraggio ignorato: il drone non risulta in volo.")
 
         # Gestione dell'attivazione/disattivazione della object detection.
+        # Il comando "detect" agisce come toggle: ogni pressione inverte lo stato.
         if actions.get("detect", False):
             if not self.detection_available:
                 print("\n[AVVISO] Detection YOLO non disponibile: comando ignorato.")
@@ -152,6 +203,8 @@ class DroneControlLoop:
 
         # Calcola il comando di movimento continuo sulla base dello stato corrente
         # del joystick e della velocità configurata.
+        # Il dizionario restituito contiene le quattro componenti RC:
+        # sinistra/destra, avanti/indietro, su/giù e imbardata.
         command = get_command(self.speed)
         self.controller.send_rc_control(
             command["lr"],
@@ -171,7 +224,11 @@ class VisionLoop:
     # - opzionalmente corregge la distorsione dell'immagine;
     # - esegue object detection multi-modello;
     # - opzionalmente esegue stima di posa;
+    # - applica opzionalmente un filtro di Kalman alla posa stimata;
     # - disegna overlay informativi e visualizza il frame finale.
+    #
+    # La classe mantiene inoltre una cache dello stato del drone, così da evitare
+    # interrogazioni troppo frequenti al controller durante l'elaborazione video.
 
     def __init__(
         self,
@@ -180,15 +237,19 @@ class VisionLoop:
         frame_timeout_sec: float,
         frame_from_controller_is_rgb: bool = False,
         status_refresh_sec: float = 1.0,
+        flight_data_logger: Optional[FlightDataLogger] = None,
+        pose_filter: Optional[PositionKalmanFilter] = None,
     ):
         # Lista dei detector YOLO inizializzati. Viene forzata a lista per
         # garantire una struttura uniforme anche se in ingresso è None o iterabile generico.
         self.detectors = list(detectors or [])
 
         # Stimatore di posa della camera/drone, eventualmente assente.
+        # Quando None, l'applicazione si limita allo stream video e alla detection YOLO.
         self.pose_estimator = pose_estimator
 
         # Tempo massimo tollerato senza ricezione di frame video.
+        # Superata questa soglia, il ciclo di visione segnala un errore di stream.
         self.frame_timeout_sec = frame_timeout_sec
 
         # Specifica se il frame ricevuto dal controller è in formato RGB;
@@ -200,6 +261,8 @@ class VisionLoop:
         self.status_refresh_sec = status_refresh_sec
 
         # Timestamp dell'ultimo frame ricevuto correttamente.
+        # time.monotonic() è adatto a misure di intervalli temporali perché
+        # non risente di eventuali modifiche dell'orologio di sistema.
         self.last_frame_received_at = time.monotonic()
 
         # Timestamp dell'ultimo aggiornamento dello stato del drone.
@@ -213,9 +276,23 @@ class VisionLoop:
             "battery": None,
         }
 
+        # Logger opzionale dei dati di volo, alimentato a partire dalla posa fusa
+        # stimata dal modulo AprilTag quando disponibile.
+        self.flight_data_logger = flight_data_logger
+
+        # Filtro di Kalman opzionale applicato alla posa assoluta stimata.
+        # Il filtro non modifica la logica di detection AprilTag: opera solo
+        # dopo la fusione della posa camera/drone.
+        self.pose_filter = pose_filter
+
+        # Ultima posa filtrata disponibile. Può essere usata per debug,
+        # logging o future estensioni del controllo.
+        self.last_filtered_pose_estimate = None
+
     def _normalize_frame_for_opencv(self, frame):
         # OpenCV utilizza tipicamente il formato BGR.
         # Se il controller restituisce frame RGB, si esegue la conversione.
+        # La funzione centralizza questa scelta, evitando duplicazioni nel ciclo principale.
         if self.frame_from_controller_is_rgb:
             return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         return frame
@@ -230,6 +307,8 @@ class VisionLoop:
         self.last_status_refresh_at = now
         try:
             # In caso di successo, salva nella cache solo i campi di interesse.
+            # Questa scelta riduce il contenuto gestito dall'interfaccia video
+            # alle sole informazioni effettivamente visualizzate.
             status = controller.get_status()
             self.cached_status = {
                 "connected": status.get("connected", False),
@@ -256,6 +335,8 @@ class VisionLoop:
 
         detection_text = str(detection_enabled)
 
+        # Le stringhe sono organizzate in una lista per poterle disegnare
+        # in modo uniforme con un semplice ciclo.
         lines = [
             f"Connesso      : {connected_text}",
             f"In volo       : {flying_text}",
@@ -278,9 +359,58 @@ class VisionLoop:
             )
             y += 30
 
+    def _log_latest_pose_estimate(self):
+        # Registra nel logger la posa assoluta più informativa disponibile.
+        # Si privilegia la posa del drone/body; in assenza di essa si usa,
+        # come fallback, la posa assoluta della camera.
+        if self.flight_data_logger is None or self.pose_estimator is None:
+            return
+
+        raw_pose = self.pose_estimator.last_fused_body_pose
+        if raw_pose is None:
+            raw_pose = self.pose_estimator.last_fused_camera_pose
+
+        if raw_pose is None:
+            return
+
+        # All'inizio la posa filtrata coincide con la posa grezza.
+        # Se il filtro è disponibile, viene poi sostituita dalla posa Kalman.
+        filtered_pose = raw_pose
+
+        if self.pose_filter is not None:
+            try:
+                kalman_pose = self.pose_filter.filter_pose_estimate(raw_pose)
+                if kalman_pose is not None:
+                    filtered_pose = kalman_pose
+                    self.last_filtered_pose_estimate = kalman_pose
+            except Exception:
+                # L'errore del filtro viene registrato nel logger, ma non interrompe
+                # il ciclo di visione: la stima grezza rimane comunque disponibile.
+                LOGGER.exception("Errore durante il filtraggio Kalman della posa.")
+                self.last_filtered_pose_estimate = None
+
+        # Registrazione comparativa:
+        # - raw_pose      = posa stimata/fusa da AprilTag;
+        # - filtered_pose = posa stabilizzata dal filtro di Kalman.
+        #
+        # In questo modo, alla fine del volo, è possibile generare grafici
+        # che mostrano l'effetto del filtro.
+        if hasattr(self.flight_data_logger, "log_pose_pair"):
+            self.flight_data_logger.log_pose_pair(
+                raw_pose_estimate=raw_pose,
+                filtered_pose_estimate=filtered_pose,
+            )
+        else:
+            # Fallback per compatibilità con una vecchia versione del logger.
+            # In assenza del metodo comparativo, viene registrata soltanto
+            # la posa filtrata o, se il filtro non è disponibile, la posa grezza.
+            self.flight_data_logger.log_pose_estimate(filtered_pose)
+
     def _draw_multi_model_detections(self, frame, analysis_frame):
         # Esegue la detection per ciascun modello disponibile e disegna
         # bounding box e label sul frame da mostrare a video.
+        # Ogni detector può essere associato a un nome e a un colore specifico,
+        # così da distinguere visivamente i risultati dei diversi modelli.
         for item in self.detectors:
             detector = item["detector"]
             color = item["color"]
@@ -304,6 +434,8 @@ class VisionLoop:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
                 # Disegno dell'etichetta con nome del modello, classe e confidenza.
+                # max(20, y1 - 10) evita che il testo venga posizionato fuori
+                # dall'immagine quando il bounding box è vicino al bordo superiore.
                 cv2.putText(
                     frame,
                     label,
@@ -332,6 +464,8 @@ class VisionLoop:
                 return False
             return True
 
+        # Aggiorna il timestamp dell'ultimo frame valido e rinfresca,
+        # se necessario, le informazioni di stato mostrate in overlay.
         self.last_frame_received_at = time.monotonic()
         self._refresh_status(controller)
         frame = self._normalize_frame_for_opencv(frame)
@@ -342,6 +476,8 @@ class VisionLoop:
         analysis_frame_is_undistorted = False
 
         # Se disponibile e abilitato, applica la correzione di distorsione.
+        # La correzione migliora la coerenza geometrica della stima di posa,
+        # soprattutto quando si usano parametri di calibrazione della camera.
         if self.pose_estimator is not None and self.pose_estimator.enabled:
             try:
                 undistorted_frame = self.pose_estimator.undistort_frame(frame)
@@ -374,12 +510,26 @@ class VisionLoop:
                     drawing_frame=display_frame,
                     frame_is_undistorted=analysis_frame_is_undistorted,
                 )
+                self._log_latest_pose_estimate()
             except Exception:
                 print("\n[ERRORE] Stima posa AprilTag fallita sul frame corrente.")
 
         # Disegna informazioni di stato generali e mostra il risultato finale.
         self._draw_status_overlay(display_frame, detection_enabled=detection_is_active)
-        cv2.imshow("Tello Detection", display_frame)
+        cv2.imshow(VIDEO_WINDOW_TITLE, display_frame)
+
+        # Se l'utente chiude manualmente la finestra OpenCV, il ciclo viene terminato
+        # in modo esplicito invece di proseguire silenziosamente senza interfaccia video.
+        try:
+            if cv2.getWindowProperty(VIDEO_WINDOW_TITLE, cv2.WND_PROP_VISIBLE) < 1:
+                print("\n[EVENTO] Finestra video chiusa dall'utente.")
+                return False
+        except cv2.error:
+            # Alcune piattaforme possono sollevare un errore se la finestra non è
+            # ancora completamente inizializzata o è già stata distrutta.
+            # In tal caso si evita di interrompere il programma per un dettaglio GUI.
+            pass
+
         return True
 
 
@@ -401,6 +551,7 @@ def create_detectors():
         import torch
     except ImportError as exc:
         # Il caricamento dei detector richiede torch e il relativo ecosistema.
+        # L'eccezione viene rilanciata con un messaggio più esplicativo per l'utente.
         raise ImportError(
             "Per usare il detector devi installare torch e le dipendenze richieste da ultralytics."
         ) from exc
@@ -411,6 +562,8 @@ def create_detectors():
     load_errors = []
 
     # Caricamento iterativo dei modelli definiti in configurazione.
+    # Ogni elemento della lista contiene metadati utili alla visualizzazione
+    # e l'oggetto detector vero e proprio.
     for model_cfg in APP_CONFIG.yolo_models:
         try:
             detectors.append(
@@ -428,7 +581,7 @@ def create_detectors():
         except Exception as exc:
             # Gli errori vengono raccolti per consentire un report aggregato,
             # senza interrompere il caricamento degli altri modelli.
-            load_errors.append(f"{model_cfg.name}: {exc}")
+            load_errors.append(f"{model_cfg.name} ({model_cfg.path}): {exc}")
 
     # Se nessun detector è stato inizializzato e sono presenti errori,
     # si solleva un'eccezione bloccante.
@@ -448,16 +601,25 @@ def create_detectors():
     return detectors
 
 
+def create_flight_data_logger():
+    # Crea il logger dei dati di volo usando il percorso centralizzato
+    # definito nella configurazione applicativa.
+    return FlightDataLogger(filename=APP_CONFIG.flight_data_log_path)
+
+
 def create_pose_estimator():
     # Crea e configura il modulo di stima posa sulla base dei parametri
     # definiti in APP_CONFIG.camera_pose.
     pose_cfg = APP_CONFIG.camera_pose
 
     # Se la stima posa è disabilitata in configurazione, non viene creato alcun oggetto.
+    # Il resto dell'applicazione è progettato per funzionare anche senza questo modulo.
     if not pose_cfg.enabled:
         return None
 
     # Costruzione dello stimatore con tutti i parametri geometrici e algoritmici necessari.
+    # I parametri includono calibrazione intrinseca della camera, distorsione,
+    # famiglia di tag, dimensione fisica del tag e informazioni di posa nel mondo.
     return CameraPoseEstimator(
         camera_matrix=pose_cfg.camera_matrix,
         dist_coeffs=pose_cfg.dist_coeffs,
@@ -474,6 +636,21 @@ def create_pose_estimator():
     )
 
 
+def create_pose_filter():
+    # Crea il filtro di Kalman per stabilizzare la posizione assoluta stimata
+    # tramite AprilTag. Il filtro viene applicato alla posa già fusa, non alle
+    # posizioni note dei tag nel mondo.
+    #
+    # I parametri numerici regolano il compromesso tra fiducia nel modello dinamico
+    # e fiducia nelle misure: valori più alti di measurement_noise rendono il filtro
+    # meno sensibile alle misure istantanee.
+    return PositionKalmanFilter(
+        process_noise=0.15,
+        measurement_noise=0.08,
+        initial_covariance=1.0,
+    )
+
+
 def main():
     # Funzione principale dell'applicazione.
     # Coordina l'inizializzazione dei sottosistemi, l'esecuzione del ciclo
@@ -485,6 +662,7 @@ def main():
     screen = None
     clock = None
     controller = None
+    flight_data_logger = None
 
     try:
         print_phase("1. Inizializzazione input utente")
@@ -525,6 +703,18 @@ def main():
             # Anche la stima posa è opzionale: il sistema prosegue senza tale funzionalità.
             print(f"Stima posa AprilTag non disponibile: {exc}")
 
+        pose_filter = None
+        if pose_estimator is not None:
+            try:
+                pose_filter = create_pose_filter()
+                print("Filtro di Kalman per la posizione inizializzato.")
+            except Exception as exc:
+                # Il filtro è opzionale: se non viene creato, si continua con la posa grezza/fusa.
+                print(f"Filtro di Kalman non disponibile: {exc}")
+
+        flight_data_logger = create_flight_data_logger()
+        print(f"Flight data logger attivo: {APP_CONFIG.flight_data_log_path}")
+
         # Costruzione dei due cicli principali dell'applicazione:
         # uno dedicato al controllo del drone, l'altro alla visione.
         control_loop = DroneControlLoop(
@@ -538,14 +728,18 @@ def main():
             pose_estimator=pose_estimator,
             frame_timeout_sec=APP_CONFIG.frame_timeout_sec,
             frame_from_controller_is_rgb=APP_CONFIG.frame_from_controller_is_rgb,
+            flight_data_logger=flight_data_logger,
+            pose_filter=pose_filter,
         )
 
         print_drone_status(controller, yolo_enabled=control_loop.is_detection_enabled())
 
         print("\nSistema pronto.")
         print("Avvia il decollo con il controller quando vuoi.")
+        print("Premi Options per uscire e generare cartella sessione con log e grafici.")
 
         # Gestione della periodicità di stampa dello stato nel terminale.
+        # La stampa non viene effettuata a ogni iterazione per evitare output eccessivo.
         last_status_print_at = time.monotonic()
         status_print_interval_sec = 10.0
 
@@ -557,6 +751,8 @@ def main():
                 continue
 
             # Passo di visione: acquisisce ed elabora il frame corrente.
+            # Lo stato della detection viene letto dal ciclo di controllo,
+            # poiché l'attivazione è comandata dal joystick.
             running = vision_loop.step(
                 controller,
                 run_detection=control_loop.is_detection_enabled(),
@@ -565,6 +761,7 @@ def main():
                 continue
 
             # Consente l'uscita anche dalla finestra OpenCV tramite il tasto "q".
+            # Prima della terminazione vengono azzerati i comandi RC per sicurezza.
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 controller.send_rc_control(0, 0, 0, 0)
                 print("\n[EVENTO] Uscita richiesta dalla finestra video.")
@@ -584,6 +781,7 @@ def main():
                 pygame.display.flip()
 
             # Regolazione del frame rate del ciclo principale.
+            # Questa istruzione evita che il ciclo consumi inutilmente CPU.
             if clock is not None:
                 clock.tick(APP_CONFIG.fps)
 
@@ -597,6 +795,9 @@ def main():
         raise
     finally:
         # Blocco di cleanup eseguito sempre, indipendentemente da errori o terminazione normale.
+        # È una sezione essenziale nei programmi che interagiscono con hardware reale,
+        # perché garantisce il rilascio ordinato delle risorse e riduce il rischio
+        # di lasciare il drone in uno stato non controllato.
         if controller is not None:
             try:
                 # Azzeramento dei comandi RC per evitare movimenti residui.
@@ -617,7 +818,38 @@ def main():
             except Exception:
                 pass
 
+        if flight_data_logger is not None:
+            try:
+                if flight_data_logger.has_data():
+                    if hasattr(flight_data_logger, "export_session"):
+                        session_dir = flight_data_logger.export_session()
+
+                        if session_dir is not None:
+                            print(f"\n[LOG VOLO] Cartella sessione generata: {session_dir}")
+                            print("[LOG VOLO] Contenuto previsto:")
+                            print("  - flight_data.txt")
+                            print("  - x_raw_vs_filtered.png")
+                            print("  - y_raw_vs_filtered.png")
+                            print("  - z_raw_vs_filtered.png")
+                            print("  - trajectory_xy_raw_vs_filtered.png")
+                            print("  - filter_error_norm.png")
+                        else:
+                            print("\n[LOG VOLO] Errore durante la generazione della cartella sessione.")
+                    else:
+                        # Fallback per compatibilità con una vecchia versione del logger.
+                        saved_path = flight_data_logger.save_to_file()
+                        if saved_path is not None:
+                            print(f"\n[LOG VOLO] Dati salvati in: {saved_path}")
+
+                    print(flight_data_logger.get_summary())
+                else:
+                    print("\n[LOG VOLO] Nessuna posa valida registrata: file non generato.")
+            except Exception:
+                LOGGER.exception("Errore durante il salvataggio finale dei dati di volo.")
+
         # Chiusura delle finestre e dei sottosistemi grafici/input.
+        # L'ordine consente di rilasciare sia la parte OpenCV sia quella pygame
+        # dopo la chiusura della connessione con il drone.
         cv2.destroyAllWindows()
         close_joystick()
         pygame.quit()

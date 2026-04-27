@@ -1,8 +1,10 @@
 import logging
 
 # Inizializzazione del logger associato al modulo corrente.
-# Tale oggetto viene utilizzato per registrare messaggi informativi,
-# avvisi ed errori relativi alla gestione del drone reale.
+# Il logger consente di registrare messaggi informativi, avvisi ed errori
+# senza interrompere necessariamente il flusso del programma.
+# L'uso di __name__ permette di identificare il modulo sorgente dei messaggi
+# all'interno di applicazioni composte da più file Python.
 LOGGER = logging.getLogger(__name__)
 
 
@@ -11,29 +13,34 @@ class RealTelloController:
 
     def __init__(self):
         # L'import della libreria djitellopy viene eseguito all'interno del costruttore
-        # per rendere esplicita la dipendenza solo nel caso in cui si scelga di
-        # istanziare effettivamente un controller per hardware reale.
-        # In questo modo, moduli che importano questa classe ma non la utilizzano
-        # non richiedono necessariamente la presenza immediata della libreria.
+        # per rendere esplicita la dipendenza solo nel momento in cui si sceglie di
+        # istanziare effettivamente un controller per l'hardware reale.
+        # Questa scelta implementativa evita che l'intero progetto dipenda da djitellopy
+        # anche quando si utilizzano soltanto modalità simulate o componenti non reali.
         try:
             from djitellopy import Tello
         except ImportError as exc:
+            # L'eccezione viene rilanciata con un messaggio più esplicativo per l'utente.
+            # L'uso di "from exc" conserva la causa originale dell'errore, facilitando
+            # il debugging e mantenendo la catena delle eccezioni.
             raise ImportError(
                 "Per usare il drone reale devi installare djitellopy: pip install djitellopy"
             ) from exc
 
         # Creazione dell'oggetto che incapsula la comunicazione con il drone Tello.
-        # Tutte le operazioni operative sul drone fisico vengono demandate a questa istanza.
+        # Tutte le operazioni operative sul drone fisico, come connessione, decollo,
+        # atterraggio, controllo RC e gestione video, vengono demandate a questa istanza.
         self.tello = Tello()
 
-        # Riferimento al gestore del flusso video restituito dalla libreria.
+        # Riferimento al gestore del flusso video restituito dalla libreria djitellopy.
         # Rimane None finché lo stream video non viene avviato correttamente.
+        # Quando valorizzato, permette di accedere ai frame catturati dalla camera.
         self.frame_reader = None
 
         # Stato logico locale del controller.
         # Questi attributi non sostituiscono lo stato reale del drone, ma permettono
         # di effettuare controlli preliminari prima di inviare comandi non leciti
-        # rispetto al flusso operativo previsto.
+        # rispetto alla sequenza operativa prevista.
         self.is_connected = False
         self.is_flying = False
 
@@ -41,13 +48,16 @@ class RealTelloController:
     def _clamp_rc_value(value: int) -> int:
         # Converte il valore ricevuto in intero e lo limita all'intervallo ammesso
         # dai comandi RC del drone, convenzionalmente compreso tra -100 e 100.
-        # Questo metodo evita l'invio di valori fuori specifica ai comandi di controllo.
+        # Questo metodo di utilità evita l'invio di valori fuori specifica
+        # all'interfaccia di controllo del drone.
         value = int(value)
         return max(-100, min(100, value))
 
     def connect(self):
         # Stabilisce la connessione con il drone, a meno che essa non risulti
         # già attiva secondo lo stato interno del controller.
+        # Il controllo evita chiamate ridondanti a connect(), che potrebbero produrre
+        # comportamenti indesiderati o messaggi superflui nella comunicazione col drone.
         if self.is_connected:
             LOGGER.info("REAL | Il drone è già connesso.")
             return
@@ -97,6 +107,8 @@ class RealTelloController:
             raise
 
         # Aggiornamento dello stato locale a seguito del successo del comando.
+        # Tale stato verrà usato dai metodi successivi per decidere se inviare
+        # comandi di movimento o se consentire l'atterraggio.
         self.is_flying = True
         LOGGER.info("REAL | Decollo eseguito.")
         return True
@@ -116,6 +128,9 @@ class RealTelloController:
         try:
             self.tello.land()
         except Exception:
+            # L'errore viene registrato e propagato, poiché un problema durante
+            # l'atterraggio richiede attenzione da parte del chiamante o del sistema
+            # che coordina il controllo del drone.
             LOGGER.exception("REAL | Errore durante l'atterraggio.")
             raise
 
@@ -147,6 +162,9 @@ class RealTelloController:
                 self._clamp_rc_value(yaw),
             )
         except Exception:
+            # Poiché il controllo RC agisce direttamente sul movimento del drone,
+            # un errore in questa fase viene registrato e rilanciato per non
+            # nascondere condizioni potenzialmente critiche.
             LOGGER.exception("REAL | Errore durante l'invio dei comandi RC.")
             raise
 
@@ -155,6 +173,8 @@ class RealTelloController:
     def get_status(self) -> dict:
         # Restituisce un dizionario contenente un riepilogo dello stato del controller.
         # Se possibile, viene inclusa anche la percentuale di batteria letta dal drone.
+        # Il valore None per la batteria indica che il dato non è disponibile,
+        # ad esempio perché il drone non è connesso o perché la lettura è fallita.
         battery = None
         if self.is_connected:
             try:
@@ -189,6 +209,10 @@ class RealTelloController:
         try:
             self.tello.streamoff()
         except Exception:
+            # L'errore viene ignorato intenzionalmente: in questa fase lo scopo è
+            # solo riportare lo stream a uno stato noto prima di riavviarlo.
+            # Se lo stream era già spento, la chiamata può fallire senza compromettere
+            # la procedura successiva.
             pass
 
         # Variabili di supporto usate per gestire correttamente il rollback
@@ -198,6 +222,8 @@ class RealTelloController:
 
         try:
             # Attivazione dello stream video e acquisizione del relativo frame reader.
+            # Il frame reader è l'oggetto attraverso cui il programma accede
+            # ai frame prodotti dalla camera del drone.
             self.tello.streamon()
             stream_started = True
             frame_reader = self.tello.get_frame_read()
@@ -224,6 +250,8 @@ class RealTelloController:
             raise RuntimeError("Impossibile avviare il reader del video stream.")
 
         # Memorizzazione del reader nello stato dell'oggetto.
+        # Da questo momento get_frame() potrà interrogare self.frame_reader
+        # per ottenere i frame correnti dello stream.
         self.frame_reader = frame_reader
         LOGGER.info("REAL | Video stream avviato.")
 
@@ -237,7 +265,8 @@ class RealTelloController:
             frame = self.frame_reader.frame
         except Exception:
             # Eventuali errori di lettura vengono registrati e gestiti restituendo None,
-            # così da consentire al chiamante di rilevare l'assenza di un frame valido.
+            # così da consentire al chiamante di rilevare l'assenza di un frame valido
+            # senza arrestare necessariamente l'intero programma.
             LOGGER.exception("REAL | Errore durante la lettura del frame video.")
             return None
 
@@ -246,6 +275,8 @@ class RealTelloController:
 
         # Viene restituita una copia del frame per evitare che modifiche esterne
         # interferiscano con il buffer condiviso gestito dal frame reader.
+        # Questa scelta è particolarmente utile quando il frame viene elaborato
+        # da moduli di visione artificiale che potrebbero modificarne i pixel.
         return frame.copy()
 
     def stop_video_stream(self):
@@ -258,12 +289,16 @@ class RealTelloController:
 
         # L'attributo viene azzerato immediatamente per impedire ulteriori accessi
         # a un reader che sta per essere arrestato.
+        # Questa operazione riduce il rischio che altri metodi leggano frame
+        # da un oggetto in fase di chiusura.
         self.frame_reader = None
 
         if frame_reader is not None and hasattr(frame_reader, "stop"):
             try:
                 frame_reader.stop()
             except Exception:
+                # Il fallimento dello stop del reader viene registrato, ma il metodo
+                # prosegue comunque tentando di spegnere lo stream lato drone.
                 LOGGER.exception("REAL | Errore durante lo stop del frame reader.")
 
         # Se il controller è connesso, si tenta comunque di disattivare lo stream lato drone,
@@ -298,6 +333,8 @@ class RealTelloController:
                 LOGGER.exception("REAL | Errore durante la chiusura della connessione Tello.")
 
         # Reset dello stato interno, indipendentemente dall'esito della chiusura remota.
+        # In questo modo l'oggetto torna in una condizione coerente dal punto di vista
+        # applicativo, anche se la libreria o il drone hanno restituito un errore.
         self.is_connected = False
         self.is_flying = False
         LOGGER.info("REAL | Connessione chiusa.")
