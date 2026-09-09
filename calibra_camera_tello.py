@@ -1,3 +1,5 @@
+# Il modulo time viene utilizzato per gestire attese temporizzate e misurare
+# intervalli di tempo in modo monotono, utile per implementare il timeout iniziale.
 import time
 
 # OpenCV viene impiegato per l'acquisizione, l'elaborazione delle immagini
@@ -233,6 +235,7 @@ def _calibrate_charuco(all_charuco_corners, all_charuco_ids, board, image_size):
 
 
 def main():
+    """Esegue l'acquisizione delle viste ChArUco dal Tello e calcola la calibrazione della camera."""
     # L'import della libreria per il drone viene effettuato all'interno della funzione
     # principale per isolare la dipendenza al solo caso d'uso effettivo del programma.
     try:
