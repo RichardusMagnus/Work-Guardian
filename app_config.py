@@ -289,6 +289,9 @@ class AppConfig:
     #
     # L'uso di una tupla, anziché di una lista, è coerente con la natura
     # statica e non modificabile della configurazione.
+    # Configurazione MQTT
+    mqtt_broker_ip: str = "192.168.1.50"
+    
     yolo_models: tuple[YoloModelConfig, ...] = (
         YoloModelConfig(
             name="PPE_Detector",

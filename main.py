@@ -300,6 +300,18 @@ class VisionLoop:
                 x1, y1, x2, y2 = det["bbox"]
                 label = f"{model_name}: {det['label']} {det['confidence']:.2f}"
 
+                # --- INIZIO NUOVO CODICE MQTT ---
+                import paho.mqtt.publish as publish
+                import json
+                
+                payload = json.dumps({
+                    "tipo_allarme": det['label'], 
+                    "confidenza": det['confidence']
+                })
+                # Pubblica l'anomalia rilevata sul topic MQTT verso il Cervello Centrale
+                publish.single("cantiere/allarmi", payload, hostname=APP_CONFIG.mqtt_broker_ip)
+                # --- FINE NUOVO CODICE MQTT ---
+
                 # Disegno del rettangolo di delimitazione dell'oggetto rilevato.
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
@@ -313,7 +325,7 @@ class VisionLoop:
                     color,
                     2,
                 )
-
+                
     def step(self, controller: RealTelloController, run_detection: bool = False) -> bool:
         # Esegue un singolo passo del ciclo di visione:
         # 1. acquisisce un frame;
